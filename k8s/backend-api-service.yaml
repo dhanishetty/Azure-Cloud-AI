@@ -1,0 +1,14 @@
+# Placeholder Service so the frontend's nginx can resolve "backend-api".
+# It has no pods behind it yet; /api returns 502 until the backend Deployment exists.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api
+  namespace: rag-app
+spec:
+  type: ClusterIP
+  selector:
+    app: backend-api
+  ports:
+    - port: 8000
+      targetPort: 8000

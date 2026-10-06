@@ -29,7 +29,7 @@ SEARCH_QUERY_KEY = os.environ["SEARCH_QUERY_KEY"]
 SEARCH_ADMIN_KEY = os.environ["SEARCH_ADMIN_KEY"]
 OPENAI_ENDPOINT = os.environ["OPENAI_ENDPOINT"]
 OPENAI_KEY = os.environ["OPENAI_KEY"]
-OPENAI_API_VERSION = os.environ.get("OPENAI_API_VERSION", "2024-10-21")
+OPENAI_API_VERSION = os.environ.get("OPENAI_API_VERSION", "2025-04-01-preview")
 CHAT_DEPLOYMENT = os.environ["OPENAI_CHAT_DEPLOYMENT"]
 EMBED_DEPLOYMENT = os.environ["OPENAI_EMBED_DEPLOYMENT"]
 EMBED_DIMENSIONS = os.environ.get("EMBED_DIMENSIONS", "1536")
@@ -182,7 +182,6 @@ def ask(request: AskRequest):
         context = "\n\n".join(f"[Page {c['page']}] {c['content']}" for c in chunks)
         completion = openai.chat.completions.create(
             model=CHAT_DEPLOYMENT,
-            temperature=0.1,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Context excerpts:\n{context}\n\nQuestion: {request.question}"},

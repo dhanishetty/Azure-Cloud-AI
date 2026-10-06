@@ -12,7 +12,9 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | 3 | Add repo secrets | Done |
 | 4 | Add repo variable `ACR_NAME` | Done |
 | 5 | Run `deploy-acr`, then `build-push-images` | Done |
-| 6 | Deploy AKS cluster | In progress |
+| 6 | Deploy AKS cluster | Done |
+| 7 | Deploy frontend to AKS | Done |
+| 8 | Deploy Storage, AI Search and OpenAI | In progress |
 
 ## Files Created
 
@@ -23,6 +25,11 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | `.github/workflows/build-push-images.yml` | Builds and pushes `frontend`, `backend-api`, `ingestion-worker` to ACR |
 | `infra/aks.bicep` | Defines the AKS cluster (Free tier, 1 node) and the AcrPull role |
 | `.github/workflows/deploy-aks.yml` | Deploys the AKS cluster (manual run) |
+| `k8s/namespace.yaml` | Creates the `rag-app` namespace |
+| `k8s/frontend.yaml` | Frontend Deployment and public LoadBalancer Service |
+| `k8s/backend-api-service.yaml` | Placeholder backend Service (no pods yet) |
+| `infra/data-ai.bicep` | Defines Storage (blob + queue), AI Search (Free) and Azure OpenAI with two deployments |
+| `.github/workflows/deploy-data-ai.yml` | Deploys the Storage, Search and OpenAI resources (manual run) |
 
 ## Step 1: GitHub Repo
 
@@ -309,6 +316,13 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    ```
    Wait until it shows `Registered`.
 
+   **What each command does:**
+
+   | Command | What it does |
+   |---|---|
+   | `az provider register ...` | Turns on the AKS service (`Microsoft.ContainerService`) for my subscription. Azure won't create clusters until it's registered. |
+   | `az provider show ... -o tsv` | Prints the registration state (`Registering` or `Registered`) so I know when it's ready |
+
 ---
 
 2. **Check the VM size is available** in `eastus` for my subscription:
@@ -316,6 +330,15 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    az vm list-skus --location eastus --size Standard_B2s --query "[].{name:name, restrictions:restrictions[0].reasonCode}" -o table
    ```
    `restrictions` must be empty. If restricted, pick another B-series size and change `nodeVmSize` in `aks.bicep`.
+
+   **What the command does:**
+
+   | Part | What it does |
+   |---|---|
+   | `az vm list-skus` | Lists VM sizes and any restrictions on them |
+   | `--location eastus --size Standard_B2s` | Limits the list to this size in this region |
+   | `--query "[].{name:..., restrictions:...}"` | Shows only the name and the first restriction reason, if any |
+   | `-o table` | Prints a table |
 
 ---
 
@@ -326,6 +349,14 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    az role assignment create --assignee $appId --role "User Access Administrator" --scope "/subscriptions/$subId/resourceGroups/rg-portfolio"
    ```
 
+   **What each command does:**
+
+   | Command | What it does |
+   |---|---|
+   | `$appId = az ad app list ...` | Looks up the client ID of the `Azure-Cloud-AI` app registration and stores it in `$appId` |
+   | `$subId = az account show ...` | Gets the current subscription ID and stores it in `$subId` |
+   | `az role assignment create ...` | Gives the app's service principal the `User Access Administrator` role, limited to the `rg-portfolio` resource group, so the pipeline can assign `AcrPull` |
+
 ---
 
 4. **Push the new files:**
@@ -334,6 +365,14 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    git commit -m "Add AKS Bicep and deploy workflow"
    git push
    ```
+
+   **What each command does:**
+
+   | Command | What it does |
+   |---|---|
+   | `git add .` | Stages all new and changed files for the commit |
+   | `git commit -m "..."` | Saves the staged files as a snapshot in local history |
+   | `git push` | Uploads the commit to GitHub so the workflow can use `aks.bicep` |
 
 ---
 
@@ -349,11 +388,27 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    ```
    State must be `Succeeded` and one node `Ready`. `kubectl` is needed locally (`az aks install-cli` if missing).
 
+   **What each command does:**
+
+   | Command | What it does |
+   |---|---|
+   | `az aks show ... --query ... -o table` | Reads the cluster and shows its state, pricing tier and Kubernetes version |
+   | `az aks get-credentials ...` | Downloads the cluster's connection details and merges them into `~/.kube/config`, making it the current `kubectl` context |
+   | `kubectl get nodes` | Lists the cluster's worker nodes and their status |
+
 **Check ACR pull access:**
 ```powershell
 az role assignment list --scope $(az acr show -n <ACR_NAME> --query id -o tsv) --query "[?roleDefinitionName=='AcrPull'].principalType" -o tsv
 ```
 Should print `ServicePrincipal`.
+
+**What the command does:**
+
+| Part | What it does |
+|---|---|
+| `az acr show -n <ACR_NAME> --query id -o tsv` | Gets the registry's full resource ID (inside `$(...)`) |
+| `az role assignment list --scope <that ID>` | Lists role assignments on the registry |
+| `--query "[?roleDefinitionName=='AcrPull'].principalType"` | Keeps only `AcrPull` assignments and shows who holds them |
 
 **Save money when not working:**
 ```powershell
@@ -361,13 +416,188 @@ az aks stop -g rg-portfolio -n aks-azure-cloud-ai
 az aks start -g rg-portfolio -n aks-azure-cloud-ai
 ```
 
+| Command | What it does |
+|---|---|
+| `az aks stop` | Shuts down the nodes, so I stop paying for compute. The cluster config is kept. |
+| `az aks start` | Brings the nodes back up (takes a few minutes) |
+
 **Troubleshooting**
 - `AuthorizationFailed` on the role assignment: item 3 is missing or hasn't propagated. Wait a few minutes and re-run.
 - `QuotaExceeded` or `SkuNotAvailable`: the VM size or vCPU quota isn't available. Change `nodeVmSize` or region.
 - `MissingSubscriptionRegistration`: item 1 isn't finished.
 
+---
+
+---
+
+## Step 7: Deploy the Frontend to AKS
+
+**Why:** proves the full path works: image in ACR, pulled by AKS, reachable from the internet. The backend comes later, because it needs Storage, AI Search and OpenAI, which don't exist yet.
+
+**Files added** (in `k8s/`):
+
+| File | Purpose |
+|---|---|
+| `namespace.yaml` | Creates the `rag-app` namespace to keep the app's resources together |
+| `frontend.yaml` | Frontend `Deployment` (1 pod, small resource limits, health probes) and a `LoadBalancer` `Service` that gives it a public IP |
+| `backend-api-service.yaml` | Placeholder `Service` with no pods yet. The frontend's nginx looks up `backend-api` at startup and crashes if it can't resolve it. Until the backend exists, `/api` returns 502. |
+
+The frontend image is `azurecloudai12345.azurecr.io/frontend:latest`. Change it if my ACR name differs.
+
+1. **Check I'm pointed at the right cluster:**
+   ```powershell
+   kubectl config current-context
+   kubectl get nodes
+   ```
+   Context must be `aks-azure-cloud-ai` and the node `Ready`.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl config current-context` | Shows which cluster `kubectl` is talking to |
+   | `kubectl get nodes` | Lists the worker nodes and their status |
+
+---
+
+2. **Apply the manifests:**
+   ```powershell
+   kubectl apply -f k8s/namespace.yaml
+   kubectl apply -f k8s/
+   ```
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl apply -f k8s/namespace.yaml` | Creates the namespace first, because the other files need it |
+   | `kubectl apply -f k8s/` | Creates or updates everything in the folder (safe to re-run) |
+
+---
+
+3. **Watch the pod start:**
+   ```powershell
+   kubectl get pods -n rag-app -w
+   ```
+   Wait for `1/1 Running`, then press Ctrl+C.
+
+   | Part | What it does |
+   |---|---|
+   | `get pods` | Lists pods |
+   | `-n rag-app` | In the `rag-app` namespace |
+   | `-w` | Keeps watching and prints changes |
+
+---
+
+4. **Get the public IP:**
+   ```powershell
+   kubectl get service frontend -n rag-app -w
+   ```
+   `EXTERNAL-IP` shows `<pending>` for a minute or two, then an IP. Open `http://<EXTERNAL-IP>` in a browser. The page should load. Upload and Q&A won't work yet.
+
+---
+
+**Check**
+- Browser shows the frontend page.
+- `kubectl get pods -n rag-app` shows `frontend` `Running`.
+
+**Troubleshooting**
+- `ImagePullBackOff`: the image name or tag is wrong, or the nodes lack `AcrPull`. Run `kubectl describe pod -n rag-app -l app=frontend` and read the Events at the bottom.
+- `CrashLoopBackOff` with `host not found in upstream "backend-api"`: `backend-api-service.yaml` wasn't applied. Re-run item 2.
+- `EXTERNAL-IP` stays `<pending>` for over 5 minutes: run `kubectl describe service frontend -n rag-app` and read the Events.
+- Pod `Pending` with `Insufficient cpu/memory`: the single node is full. Lower the resource requests in `frontend.yaml`.
+
+**Save money:** this creates a public IP and load balancer that bill while the cluster exists. Run `az aks stop` when not working (see Step 6).
+
+---
+
+---
+
+## Step 8: Deploy Storage, AI Search and OpenAI
+
+**Why:** the backend and worker need these three services (they read their endpoints and keys from environment variables). Deployed with Bicep from a manual workflow, like ACR and AKS.
+
+**Files added:** `infra/data-ai.bicep` and `.github/workflows/deploy-data-ai.yml` (manual run only).
+
+| Resource | Details | Cost |
+|---|---|---|
+| Storage account | Standard_LRS, blob container `documents`, queue `ingest-jobs` | Cents per month |
+| AI Search | Free tier (1 per subscription, 50 MB, 3 indexes) | $0 |
+| Azure OpenAI | Account plus deployments `chat` (gpt-5-mini) and `embeddings` (text-embedding-3-small, 1536 dimensions) | Pay per token |
+
+Names get a unique suffix (`uniqueString`) because storage, search and OpenAI names must be globally unique.
+
+**Note:** the target design in `docs/architecture.md` uses managed identity with no keys. The current code reads keys and a connection string, so Step 9 stores them in a Kubernetes Secret. Switching to managed identity is a later improvement.
+
+1. **Register the resource providers** (once per subscription):
+   ```powershell
+   az provider register --namespace Microsoft.Search
+   az provider register --namespace Microsoft.CognitiveServices
+   az provider register --namespace Microsoft.Storage
+   az provider show --namespace Microsoft.CognitiveServices --query registrationState -o tsv
+   ```
+   Wait until each shows `Registered`.
+
+   | Command | What it does |
+   |---|---|
+   | `az provider register ...` | Turns on that Azure service for my subscription |
+   | `az provider show ... -o tsv` | Prints the registration state |
+
+---
+
+2. **Check the OpenAI model versions are available** in `eastus`:
+   ```powershell
+   az cognitiveservices model list --location eastus --query "[?model.name=='gpt-5-mini' || model.name=='text-embedding-3-small'].{name:model.name, version:model.version}" -o table
+   ```
+   The versions in `data-ai.bicep` (`2025-08-07` and `1`) must appear. If not, change `chatModelVersion` or `embedModelVersion`.
+
+   | Part | What it does |
+   |---|---|
+   | `az cognitiveservices model list` | Lists models Azure OpenAI offers in a region |
+   | `--query "[?model.name==...]"` | Keeps only the two models I need and shows name and version |
+
+---
+
+3. **Check I don't already have a Free AI Search service** (only one is allowed per subscription):
+   ```powershell
+   az search service list --query "[].{name:name, sku:sku.name, rg:resourceGroup}" -o table
+   ```
+   If one exists, delete it or change `sku` to `basic` in `data-ai.bicep` (about $75/month, so avoid it).
+
+---
+
+4. **Push the new files:**
+   ```powershell
+   git add .
+   git commit -m "Add Storage, Search and OpenAI Bicep and workflow"
+   git push
+   ```
+
+---
+
+5. **Run `Deploy Storage, Search and OpenAI (infra)`:** GitHub repo > **Actions** tab > select it > **Run workflow** > `main`. Takes about 3-5 minutes.
+
+---
+
+6. **Verify the resources exist:**
+   ```powershell
+   az resource list -g rg-portfolio --query "[].{name:name, type:type}" -o table
+   az cognitiveservices account deployment list -g rg-portfolio -n <openai-name> --query "[].{name:name, model:properties.model.name, state:properties.provisioningState}" -o table
+   ```
+   Expect the storage account, search service and OpenAI account, plus two deployments in state `Succeeded`. Find `<openai-name>` in the first command's output (it starts with `oai-cloud-ai-`).
+
+   | Command | What it does |
+   |---|---|
+   | `az resource list -g rg-portfolio` | Lists everything in the resource group, with names and types |
+   | `az cognitiveservices account deployment list` | Lists the model deployments (`chat`, `embeddings`) on the OpenAI account |
+
+**Troubleshooting**
+- `MissingSubscriptionRegistration`: item 1 isn't finished.
+- `InvalidTemplateDeployment` mentioning model, version or quota: the model version isn't available or the region has no quota. Run item 2, then change the version or try another region.
+- `ServiceQuotaExceeded` or "only one free search service": see item 3.
+- `SpecialFeatureOrQuotaIdNotFound` or access denied on OpenAI: the subscription may lack Azure OpenAI access. Check the portal under Azure OpenAI.
+
+**Save money:** the Free search tier and storage cost almost nothing when idle. OpenAI charges only for tokens used. Nothing here needs stopping.
+
 ## Later Steps
 
 - Add Key Vault and monitoring to infra (optionally combine into one `main.bicep` with modules).
-- Add Kubernetes manifests and a deploy-to-AKS workflow.
+- Store the keys in a Kubernetes Secret, then deploy backend-api and ingestion-worker.
+- Add a deploy-to-AKS GitHub Actions workflow (images tagged with the commit SHA).
 - Add ingress with HTTPS (NGINX + cert-manager).
