@@ -15,7 +15,8 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | 6 | Deploy AKS cluster | Done |
 | 7 | Deploy frontend to AKS | Done |
 | 8 | Deploy Storage, AI Search and OpenAI | Done |
-| 9 | Deploy backend and worker with managed identity | In progress |
+| 9 | Deploy backend and worker with managed identity | Done |
+| 10 | Deploy to AKS automatically (CI/CD) | In progress |
 
 ## Files Created
 
@@ -36,6 +37,7 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | `k8s/serviceaccounts.yaml` | ServiceAccounts `sa-api` and `sa-worker` for Workload Identity |
 | `k8s/backend-api.yaml` | Backend Deployment (managed identity, settings from `app-config`) |
 | `k8s/ingestion-worker.yaml` | Worker Deployment (managed identity, settings from `app-config`) |
+| `.github/workflows/deploy-app.yml` | Deploys the SHA-tagged images to AKS after each successful build |
 
 ## Step 1: GitHub Repo
 
@@ -812,8 +814,123 @@ This is slightly wider than the table in `docs/architecture.md`, because the cod
 
 **Later hardening:** turn off shared-key access on the storage account (`allowSharedKeyAccess: false`) and disable local auth on OpenAI, so keys can't be used at all.
 
+---
+
+---
+
+## Step 10: Deploy to AKS Automatically (CI/CD)
+
+**Why:** until now I rebuilt images and ran `kubectl` by hand. Now a push to `main` builds the images, tags them with the commit SHA, and deploys that exact version to AKS.
+
+**The flow**
+
+| Stage | Workflow | What happens |
+|---|---|---|
+| 1. Build | `build-push-images.yml` (existing) | On push to `Code/**` or `k8s/**`: builds the three images in ACR, tagged with the commit SHA |
+| 2. Deploy | `deploy-app.yml` (new) | Runs after the build succeeds: updates the four manifests with the SHA-tagged images and rolls them out on AKS |
+
+**Files added or changed**
+
+| File | Change |
+|---|---|
+| `.github/workflows/deploy-app.yml` | New: logs in with OIDC, connects to the cluster, deploys with `azure/k8s-deploy` |
+| `.github/workflows/build-push-images.yml` | Changed: `k8s/**` added to the trigger paths, so manifest changes also flow through |
+
+**What the deploy workflow does**
+
+| Part | What it does |
+|---|---|
+| `on: workflow_run` | Starts when the build workflow finishes on `main`. The `if:` skips the deploy if the build failed. |
+| `on: workflow_dispatch` | Lets me deploy by hand, with an optional `image_tag` (a tag that already exists in ACR) |
+| `TAG` | The commit SHA that was built. This is what makes each deploy traceable. |
+| `azure/login` | OIDC login, no secrets stored (same identity as Step 2) |
+| `azure/aks-set-context` | Points `kubectl` at the cluster |
+| `azure/k8s-deploy` | Swaps the image tags in the manifests, applies them, and waits for the rollout to finish |
+| `concurrency` | Prevents two deploys from running at the same time |
+
+The namespace and ServiceAccounts are not applied by the pipeline. They are one-time setup from Steps 7 and 9, and the ServiceAccounts carry the client ID annotations added by hand.
+
+**Requirement:** the AKS cluster must be running. A stopped cluster makes the deploy fail (`az aks start` first).
+
+1. **Make sure the cluster is running:**
+   ```powershell
+   az aks show -g rg-portfolio -n aks-azure-cloud-ai --query powerState.code -o tsv
+   ```
+   It must print `Running`. If `Stopped`, run `az aks start -g rg-portfolio -n aks-azure-cloud-ai`.
+
+   | Command | What it does |
+   |---|---|
+   | `az aks show ... --query powerState.code` | Prints whether the cluster is `Running` or `Stopped` |
+
+---
+
+2. **Commit and push the workflow changes:**
+   ```powershell
+   git add .
+   git commit -m "Add deploy-to-AKS workflow"
+   git push
+   ```
+   The changed `build-push-images.yml` is in the commit, so the push triggers the build, and the deploy follows it.
+
+   | Command | What it does |
+   |---|---|
+   | `git add .` | Stages all new and changed files |
+   | `git commit -m "..."` | Saves them as a snapshot in local history |
+   | `git push` | Uploads the commit to GitHub. Pushes that touch the workflow file, `Code/**` or `k8s/**` start the pipeline. |
+
+---
+
+3. **Watch both workflows:** repo > **Actions** tab. First **Build and push images to ACR**, then **Deploy app to AKS** starts on its own. Both should turn green.
+
+---
+
+4. **Verify the cluster runs the SHA-tagged images:**
+   ```powershell
+   git rev-parse HEAD
+   kubectl get deployments -n rag-app -o wide
+   ```
+   The `IMAGES` column should end with the commit SHA from `git rev-parse HEAD`, not `:latest`.
+
+   | Command | What it does |
+   |---|---|
+   | `git rev-parse HEAD` | Prints the full SHA of the latest commit |
+   | `kubectl get deployments -n rag-app -o wide` | Lists Deployments with the images they run |
+
+---
+
+5. **Test the full loop once:** make a tiny visible change in the frontend (for example, text in `Code/Frontend`), then commit and push. After both workflows finish, reload the site. The change should be live with no manual steps.
+
+---
+
+6. **Roll back if a deploy breaks the app:**
+   ```powershell
+   kubectl rollout undo deployment/backend-api -n rag-app
+   kubectl rollout history deployment/backend-api -n rag-app
+   ```
+   Or run **Deploy app to AKS** manually with an older `image_tag` (any SHA that is still in ACR).
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl rollout undo deployment/<name>` | Returns that Deployment to its previous version |
+   | `kubectl rollout history deployment/<name>` | Lists previous versions (revisions) |
+
+**Check**
+- Both workflows are green for the same commit.
+- `kubectl get deployments -n rag-app -o wide` shows the commit SHA in the images.
+- A small code change reaches the live site through a push alone.
+
+**Troubleshooting**
+- **Deploy never starts:** the build workflow failed, or it didn't run for `main`. `workflow_run` only starts from the default branch's workflow file, so the file must be pushed to `main` first.
+- **`Login failed` or `AADSTS700213`:** same federated credential issue as Step 2. The `main` branch subject must match.
+- **`Forbidden` or `Unauthorized` from `kubectl` in the deploy job:** the pipeline identity can't use the cluster. It has `Contributor` on the subscription, which normally covers it. Check the error text, and tell me if it appears.
+- **Cluster stopped or unreachable:** start the cluster, then re-run the failed deploy job.
+- **`ImagePullBackOff`:** the tag doesn't exist in ACR. Check `az acr repository show-tags --name <ACR_NAME> --repository frontend -o table`.
+- **Rollout times out:** a pod isn't becoming ready. Run `kubectl get pods -n rag-app` and `kubectl logs deployment/<name> -n rag-app`.
+- **Manual run uses the wrong tag:** with no `image_tag`, it uses the latest commit SHA, which may not have been built yet. Enter a tag that exists.
+
 ## Later Steps
 
 - Add Key Vault and monitoring to infra (optionally combine into one `main.bicep` with modules).
-- Add a deploy-to-AKS GitHub Actions workflow (images tagged with the commit SHA).
-- Add ingress with HTTPS (NGINX + cert-manager).
+- Add HTTPS and a stable hostname with a current ingress option (ingress-nginx was retired).
+- Add monitoring (Container Insights, Application Insights) with a cost cap.
+- Harden: disable storage shared keys and OpenAI local auth.

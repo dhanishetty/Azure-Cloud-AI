@@ -1,0 +1,64 @@
+name: Deploy app to AKS
+
+# Runs after "Build and push images to ACR" succeeds on main.
+# Images are tagged with the commit SHA, so each deploy is traceable and easy to roll back.
+on:
+  workflow_run:
+    workflows: ['Build and push images to ACR']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag already in ACR (default: latest commit SHA)'
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-app
+  cancel-in-progress: false
+
+env:
+  RG: rg-portfolio
+  CLUSTER: aks-azure-cloud-ai
+  NAMESPACE: rag-app
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  TAG: ${{ github.event.workflow_run.head_sha || inputs.image_tag || github.sha }}
+
+jobs:
+  deploy:
+    # For workflow_run, only deploy when the build succeeded
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ env.RG }}
+          cluster-name: ${{ env.CLUSTER }}
+
+      # Namespace and ServiceAccounts are one-time setup (Steps 7 and 9), so they are not applied here
+      - uses: azure/k8s-deploy@v5
+        with:
+          namespace: ${{ env.NAMESPACE }}
+          manifests: |
+            k8s/backend-api-service.yaml
+            k8s/backend-api.yaml
+            k8s/ingestion-worker.yaml
+            k8s/frontend.yaml
+          images: |
+            ${{ env.ACR_NAME }}.azurecr.io/frontend:${{ env.TAG }}
+            ${{ env.ACR_NAME }}.azurecr.io/backend-api:${{ env.TAG }}
+            ${{ env.ACR_NAME }}.azurecr.io/ingestion-worker:${{ env.TAG }}
