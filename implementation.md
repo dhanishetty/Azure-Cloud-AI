@@ -518,7 +518,7 @@ The frontend image is `azurecloudai12345.azurecr.io/frontend:latest`. Change it 
 | Resource | Details | Cost |
 |---|---|---|
 | Storage account | Standard_LRS, blob container `documents`, queue `ingest-jobs` | Cents per month |
-| AI Search | Free tier (1 per subscription, 50 MB, 3 indexes) | $0 |
+| AI Search | Reuse my existing Free service `rag-vector-store` (in `rg-rag-qa-demo`). Not created by this step. | $0 |
 | Azure OpenAI | Account plus deployments `chat` (gpt-5-mini) and `embeddings` (text-embedding-3-small, 1536 dimensions) | Pay per token |
 
 Names get a unique suffix (`uniqueString`) because storage, search and OpenAI names must be globally unique.
@@ -556,18 +556,29 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
 
 3. **Check I don't already have a Free AI Search service** (only one is allowed per subscription):
    ```powershell
-   az search service list --query "[].{name:name, sku:sku.name, rg:resourceGroup}" -o table
+   az resource list --resource-type Microsoft.Search/searchServices --query "[].{name:name, sku:sku.name, rg:resourceGroup}" -o table
    ```
-   If one exists, delete it or change `sku` to `basic` in `data-ai.bicep` (about $75/month, so avoid it).
+   **My result:** `rag-vector-store` (Free) already exists in `rg-rag-qa-demo`, so I reuse it. The workflow passes `createSearch=false`, so Bicep skips creating a search service. The worker creates the index itself (`create_or_update_index`), and Free allows 3 indexes. Step 9 uses this service's endpoint and keys. If the old project already uses an index named `documents-index` with a different schema, I set `SEARCH_INDEX` to a different name in Step 9. I do not delete the old service, because another project uses it.
+   If I ever want a new service instead, set `createSearch=true` and delete or change the Free service first (Basic is about $75/month, so avoid it).
 
 ---
 
 4. **Push the new files:**
    ```powershell
    git add .
-   git commit -m "Add Storage, Search and OpenAI Bicep and workflow"
+   git commit -m "Add Storage, Search and OpenAI Bicep, switch to gpt-5-mini, update backend"
    git push
    ```
+
+   **What each command does:**
+
+   | Command | What it does |
+   |---|---|
+   | `git add .` | Stages all new and changed files for the commit |
+   | `git commit -m "..."` | Saves the staged files as a snapshot in local history |
+   | `git push` | Uploads the commit to GitHub. It only sends commits: if I skip `git commit`, it says `Everything up-to-date`. |
+
+   This push also changes `Code/**`, so `build-push-images` runs and rebuilds the `backend-api` image with the gpt-5 fixes.
 
 ---
 

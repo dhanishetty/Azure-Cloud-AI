@@ -8,6 +8,9 @@ param chatModelVersion string = '2025-08-07'
 param embedModel string = 'text-embedding-3-small'
 param embedModelVersion string = '1'
 
+@description('Set false to reuse an existing AI Search service (only one Free service is allowed per subscription)')
+param createSearch bool = true
+
 var storageName = 'stcloudai${suffix}'
 var searchName = 'srch-cloud-ai-${suffix}'
 var openaiName = 'oai-cloud-ai-${suffix}'
@@ -45,7 +48,7 @@ resource ingestQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@202
 }
 
 // ---------- AI Search (Free tier: 1 per subscription, 50 MB) ----------
-resource search 'Microsoft.Search/searchServices@2023-11-01' = {
+resource search 'Microsoft.Search/searchServices@2023-11-01' = if (createSearch) {
   name: searchName
   location: location
   sku: { name: 'free' }
@@ -103,5 +106,5 @@ resource embedDeployment 'Microsoft.CognitiveServices/accounts/deployments@2023-
 }
 
 output storageName string = storage.name
-output searchName string = search.name
+output searchName string = createSearch ? search.name : 'existing (not created)'
 output openaiName string = openai.name

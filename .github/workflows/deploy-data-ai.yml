@@ -26,4 +26,5 @@ jobs:
         run: |
           az deployment group create \
             -g $RG \
-            -f infra/data-ai.bicep
+            -f infra/data-ai.bicep \
+            -p createSearch=false
