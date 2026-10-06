@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --color-bg: #070b14;
+  --color-surface: #0f1626;
+  --color-border: #1e2a44;
+  --color-muted: #8b98b5;
+  --color-azure: #3b9cff;
+  --color-violet: #8b5cf6;
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-bad: #f87171;
+}
+
+body {
+  background: var(--color-bg);
+  color: #e6ecff;
+  font-family: var(--font-sans);
+  background-image:
+    radial-gradient(60rem 30rem at 10% -10%, rgb(59 156 255 / 0.15), transparent),
+    radial-gradient(50rem 30rem at 100% 0%, rgb(139 92 246 / 0.12), transparent);
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+.glass {
+  background: rgb(15 22 38 / 0.7);
+  border: 1px solid var(--color-border);
+  backdrop-filter: blur(12px);
+  border-radius: 1rem;
+}
+
+.gradient-text {
+  background: linear-gradient(90deg, var(--color-azure), var(--color-violet));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.prose-chat p { margin: 0.4rem 0; }
+.prose-chat ul { list-style: disc; padding-left: 1.25rem; }
+.prose-chat code { font-family: var(--font-mono); background: #0b1120; padding: 0.1rem 0.35rem; border-radius: 0.3rem; }

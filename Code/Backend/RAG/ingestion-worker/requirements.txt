@@ -1,0 +1,6 @@
+azure-storage-blob>=12.22
+azure-storage-queue>=12.10
+azure-search-documents>=11.6.0
+openai>=1.50
+pypdf>=5.0
+langchain-text-splitters>=0.3
