@@ -6,7 +6,7 @@ import re
 import signal
 import time
 
-from azure.core.credentials import AzureKeyCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
@@ -28,14 +28,12 @@ from pypdf import PdfReader
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("ingestion-worker")
 
-STORAGE_CONNECTION_STRING = os.environ["STORAGE_CONNECTION_STRING"]
+STORAGE_ACCOUNT_NAME = os.environ["STORAGE_ACCOUNT_NAME"]
 BLOB_CONTAINER = os.environ.get("BLOB_CONTAINER", "documents")
 QUEUE_NAME = os.environ.get("QUEUE_NAME", "ingest-jobs")
 SEARCH_ENDPOINT = os.environ["SEARCH_ENDPOINT"]
 SEARCH_INDEX = os.environ.get("SEARCH_INDEX", "documents-index")
-SEARCH_ADMIN_KEY = os.environ["SEARCH_ADMIN_KEY"]
 OPENAI_ENDPOINT = os.environ["OPENAI_ENDPOINT"]
-OPENAI_KEY = os.environ["OPENAI_KEY"]
 OPENAI_API_VERSION = os.environ.get("OPENAI_API_VERSION", "2024-10-21")
 EMBED_DEPLOYMENT = os.environ["OPENAI_EMBED_DEPLOYMENT"]
 EMBED_DIMENSIONS = int(os.environ.get("EMBED_DIMENSIONS", "1536"))
@@ -46,12 +44,17 @@ VISIBILITY_TIMEOUT_SECONDS = 600
 MAX_ATTEMPTS = 3
 IDLE_POLL_SECONDS = 5
 
-credential = AzureKeyCredential(SEARCH_ADMIN_KEY)
-container = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING).get_container_client(BLOB_CONTAINER)
-queue = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, QUEUE_NAME)
+# One identity for everything: workload identity on AKS, `az login` locally
+credential = DefaultAzureCredential()
+container = BlobServiceClient(f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net", credential).get_container_client(BLOB_CONTAINER)
+queue = QueueClient(f"https://{STORAGE_ACCOUNT_NAME}.queue.core.windows.net", QUEUE_NAME, credential)
 index_client = SearchIndexClient(SEARCH_ENDPOINT, credential)
 search = SearchClient(SEARCH_ENDPOINT, SEARCH_INDEX, credential)
-openai = AzureOpenAI(azure_endpoint=OPENAI_ENDPOINT, api_key=OPENAI_KEY, api_version=OPENAI_API_VERSION)
+openai = AzureOpenAI(
+    azure_endpoint=OPENAI_ENDPOINT,
+    azure_ad_token_provider=get_bearer_token_provider(credential, "https://cognitiveservices.azure.com/.default"),
+    api_version=OPENAI_API_VERSION,
+)
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 
 stop_requested = False

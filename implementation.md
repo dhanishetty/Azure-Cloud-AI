@@ -14,7 +14,8 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | 5 | Run `deploy-acr`, then `build-push-images` | Done |
 | 6 | Deploy AKS cluster | Done |
 | 7 | Deploy frontend to AKS | Done |
-| 8 | Deploy Storage, AI Search and OpenAI | In progress |
+| 8 | Deploy Storage, AI Search and OpenAI | Done |
+| 9 | Deploy backend and worker with managed identity | In progress |
 
 ## Files Created
 
@@ -30,6 +31,11 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | `k8s/backend-api-service.yaml` | Placeholder backend Service (no pods yet) |
 | `infra/data-ai.bicep` | Defines Storage (blob + queue), AI Search (Free) and Azure OpenAI with two deployments |
 | `.github/workflows/deploy-data-ai.yml` | Deploys the Storage, Search and OpenAI resources (manual run) |
+| `infra/identity.bicep` | Managed identities, federated credentials and Storage/OpenAI role assignments |
+| `.github/workflows/deploy-identity.yml` | Deploys the identities and roles (manual run) |
+| `k8s/serviceaccounts.yaml` | ServiceAccounts `sa-api` and `sa-worker` for Workload Identity |
+| `k8s/backend-api.yaml` | Backend Deployment (managed identity, settings from `app-config`) |
+| `k8s/ingestion-worker.yaml` | Worker Deployment (managed identity, settings from `app-config`) |
 
 ## Step 1: GitHub Repo
 
@@ -606,9 +612,208 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
 
 **Save money:** the Free search tier and storage cost almost nothing when idle. OpenAI charges only for tokens used. Nothing here needs stopping.
 
+---
+
+---
+
+## Step 9: Deploy the Backend and Worker with Managed Identity
+
+**Why:** completes the app with **no keys or connection strings**. Each app gets its own Azure managed identity. Pods prove who they are through AKS Workload Identity, and Azure roles decide what each identity may do.
+
+**How it fits together**
+
+| Piece | Role |
+|---|---|
+| Managed identities `id-api`, `id-worker` | The Azure identity each app runs as |
+| Federated credential (per identity) | Trusts one Kubernetes ServiceAccount: "tokens from AKS for `rag-app/sa-api` may act as `id-api`" |
+| ServiceAccounts `sa-api`, `sa-worker` | The Kubernetes identity of each pod, annotated with the managed identity's client ID |
+| Pod label `azure.workload.identity/use: "true"` | Tells AKS to inject the token into the pod |
+| `DefaultAzureCredential` in the code | Picks up that token automatically (and `az login` when running locally) |
+| Role assignments | Storage, OpenAI and Search permissions per identity |
+
+**Roles**
+
+| Identity | Storage | OpenAI | AI Search |
+|---|---|---|---|
+| `id-api` | Blob Data Contributor, Queue Message Sender | OpenAI User | Index Data Contributor (reads and deletes chunks) |
+| `id-worker` | Blob Data Contributor (updates blob status), Queue Message Processor | OpenAI User | Index Data Contributor, Service Contributor (creates the index) |
+
+This is slightly wider than the table in `docs/architecture.md`, because the code deletes chunks and updates blob metadata.
+
+**Files added or changed**
+
+| File | Change |
+|---|---|
+| `infra/identity.bicep` | New: identities, federated credentials, Storage and OpenAI role assignments |
+| `.github/workflows/deploy-identity.yml` | New: deploys `identity.bicep` (manual run) |
+| `k8s/serviceaccounts.yaml` | New: `sa-api` and `sa-worker` |
+| `k8s/backend-api.yaml`, `k8s/ingestion-worker.yaml` | New: Deployments using the ServiceAccounts, the workload identity label, and settings from the `app-config` ConfigMap |
+| `backend-api/main.py`, `ingestion-worker/worker.py` | Changed: `DefaultAzureCredential` instead of keys. Env var `STORAGE_ACCOUNT_NAME` replaces the connection string. |
+| both `requirements.txt` | Added `azure-identity` |
+
+1. **Commit and push** (this also rebuilds the images with the new code):
+   ```powershell
+   git add .
+   git commit -m "Use managed identity: identities, k8s manifests, code changes"
+   git push
+   ```
+   Wait for **Build and push images to ACR** to turn green (Actions tab) before deploying the pods.
+
+   | Command | What it does |
+   |---|---|
+   | `git add .` | Stages all new and changed files |
+   | `git commit -m "..."` | Saves them as a snapshot in local history |
+   | `git push` | Uploads the commit to GitHub. Changes under `Code/**` trigger the image build. |
+
+---
+
+2. **Run `Deploy identities and roles (infra)`:** repo > **Actions** tab > select it > **Run workflow** > `main`. Then verify:
+   ```powershell
+   az identity list -g rg-portfolio --query "[].{name:name, clientId:clientId}" -o table
+   ```
+   Expect `id-api` and `id-worker`.
+
+   | Command | What it does |
+   |---|---|
+   | `az identity list -g rg-portfolio` | Lists managed identities in the resource group, with their client IDs |
+
+---
+
+3. **Give both identities access to the shared AI Search service.** It's in another resource group (`rg-rag-qa-demo`), so the pipeline can't do this. Run it as me:
+   ```powershell
+   $apiPid = az identity show -g rg-portfolio -n id-api --query principalId -o tsv
+   $workerPid = az identity show -g rg-portfolio -n id-worker --query principalId -o tsv
+   $searchId = az search service show -g rg-rag-qa-demo -n rag-vector-store --query id -o tsv
+
+   az search service update -g rg-rag-qa-demo -n rag-vector-store --auth-options aadOrApiKey --aad-auth-failure-mode http401WithBearerChallenge
+
+   az role assignment create --assignee-object-id $apiPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
+   az role assignment create --assignee-object-id $workerPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
+   az role assignment create --assignee-object-id $workerPid --assignee-principal-type ServicePrincipal --role "Search Service Contributor" --scope $searchId
+   ```
+
+   | Command | What it does |
+   |---|---|
+   | `az identity show ... principalId` | Gets each identity's object ID, which role assignments need |
+   | `az search service show ... id` | Gets the search service's full resource ID, to use as the scope |
+   | `az search service update --auth-options aadOrApiKey` | Turns on Entra ID (role-based) sign-in. API keys keep working, so the old project is unaffected. |
+   | `--aad-auth-failure-mode http401WithBearerChallenge` | Makes failed token sign-ins return a clear 401 |
+   | `az role assignment create ...` | Grants a role on the search service to an identity |
+
+---
+
+4. **Create the app settings as a ConfigMap** (no secrets in it):
+   ```powershell
+   $st = az storage account list -g rg-portfolio --query "[0].name" -o tsv
+   $oai = az cognitiveservices account list -g rg-portfolio --query "[?kind=='OpenAI'].name | [0]" -o tsv
+   $oaiEndpoint = az cognitiveservices account show -g rg-portfolio -n $oai --query properties.endpoint -o tsv
+   "$st | $oaiEndpoint"
+
+   kubectl create configmap app-config -n rag-app `
+     --from-literal="STORAGE_ACCOUNT_NAME=$st" `
+     --from-literal="SEARCH_ENDPOINT=https://rag-vector-store.search.windows.net" `
+     --from-literal="SEARCH_INDEX=azure-cloud-ai-index" `
+     --from-literal="OPENAI_ENDPOINT=$oaiEndpoint" `
+     --from-literal="OPENAI_API_VERSION=2025-04-01-preview" `
+     --from-literal="OPENAI_CHAT_DEPLOYMENT=chat" `
+     --from-literal="OPENAI_EMBED_DEPLOYMENT=embeddings" `
+     --from-literal="OPENAI_CHAT_MODEL=gpt-5-mini" `
+     --from-literal="OPENAI_EMBED_MODEL=text-embedding-3-small" `
+     --from-literal="EMBED_DIMENSIONS=1536"
+   ```
+   The `"$st | $oaiEndpoint"` line just prints the two values so I can check they aren't empty.
+
+   | Part | What it does |
+   |---|---|
+   | `az storage account list ... -o tsv` | Gets the storage account name Step 8 created |
+   | `az cognitiveservices account ...` | Gets the OpenAI account name and endpoint URL |
+   | `kubectl create configmap app-config -n rag-app` | Creates a ConfigMap of plain settings. The Deployments read it as environment variables. |
+   | `SEARCH_INDEX=azure-cloud-ai-index` | Own index name, so I don't clash with the old project in the shared search service |
+   | `OPENAI_*_DEPLOYMENT` | Must match the deployment names in `data-ai.bicep` (`chat`, `embeddings`) |
+   | Backtick at line end | PowerShell line continuation |
+
+   **Changing a value later:** `kubectl delete configmap app-config -n rag-app`, re-run the create command, then `kubectl rollout restart deployment/backend-api deployment/ingestion-worker -n rag-app`.
+
+---
+
+5. **Create the ServiceAccounts and link them to the identities:**
+   ```powershell
+   kubectl apply -f k8s/serviceaccounts.yaml
+
+   $apiClientId = az identity show -g rg-portfolio -n id-api --query clientId -o tsv
+   $workerClientId = az identity show -g rg-portfolio -n id-worker --query clientId -o tsv
+
+   kubectl annotate serviceaccount sa-api -n rag-app azure.workload.identity/client-id=$apiClientId --overwrite
+   kubectl annotate serviceaccount sa-worker -n rag-app azure.workload.identity/client-id=$workerClientId --overwrite
+   ```
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl apply -f k8s/serviceaccounts.yaml` | Creates `sa-api` and `sa-worker` in `rag-app` |
+   | `az identity show ... clientId` | Gets the client ID of each managed identity |
+   | `kubectl annotate serviceaccount ... client-id=...` | Tells Workload Identity which managed identity this ServiceAccount maps to |
+
+---
+
+6. **Deploy the backend and worker:**
+   ```powershell
+   kubectl apply -f k8s/
+   kubectl get pods -n rag-app -w
+   ```
+   Wait until `frontend`, `backend-api` and `ingestion-worker` all show `1/1 Running`, then press Ctrl+C.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl apply -f k8s/` | Creates or updates everything in the folder |
+   | `kubectl get pods -n rag-app -w` | Lists pods and keeps watching for changes |
+
+---
+
+7. **Check the logs:**
+   ```powershell
+   kubectl logs deployment/backend-api -n rag-app
+   kubectl logs deployment/ingestion-worker -n rag-app
+   ```
+   Expect no `Traceback` or authentication errors. The worker should log that the search index is ready and that it's waiting for messages.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl logs deployment/<name> -n rag-app` | Prints the container's output |
+
+---
+
+8. **Test through the public IP:**
+   ```powershell
+   $ip = kubectl get service frontend -n rag-app -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
+   curl.exe http://$ip/api/health
+   curl.exe http://$ip/api/info
+   ```
+   `/api/health` returns `{"status":"ok"}`. `/api/info` shows `chat_model` as `gpt-5-mini`. Then open `http://<EXTERNAL-IP>` in a browser, upload a small PDF, wait for `ready`, and ask a question.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl get service frontend ... jsonpath` | Extracts the public IP into `$ip` |
+   | `curl.exe http://$ip/api/health` | Calls the backend through the frontend's nginx (`/api/` goes to `backend-api:8000`) |
+
+**Check**
+- All three pods `Running`, and no keys anywhere: `kubectl get secrets -n rag-app` shows nothing app-related.
+- A PDF uploads, reaches `ready`, and a question gets an answer with page citations.
+
+**Troubleshooting**
+- `CredentialUnavailableError` or `ClientAuthenticationError` in the logs: the ServiceAccount annotation (item 5) or the pod label is missing, or the federated credential subject doesn't match. It must be `system:serviceaccount:rag-app:sa-api` (or `sa-worker`).
+- `403 AuthorizationPermissionMismatch` (Storage) or `PermissionDenied` (OpenAI): the role assignment from item 2 isn't there yet. Role assignments can take up to 10 minutes. Wait, then restart the pods.
+- `403` from Search: item 3 isn't finished, or RBAC isn't enabled on the service.
+- `CreateContainerConfigError`: the `app-config` ConfigMap is missing. Re-run item 4.
+- `KeyError: 'STORAGE_ACCOUNT_NAME'` (or similar) in the logs: a key is missing from the ConfigMap.
+- `ImagePullBackOff` or old behavior: the image build from item 1 hasn't finished or failed.
+- `/api/...` returns 502: the backend pod isn't ready. Check its logs.
+- `DeploymentNotFound` (404 from OpenAI): the deployment names don't match. Run `az cognitiveservices account deployment list -g rg-portfolio -n $oai -o table`.
+- `400 unsupported parameter` on `/ask`: the chat call must not set `temperature` (already removed) and the API version must be recent.
+
+**Later hardening:** turn off shared-key access on the storage account (`allowSharedKeyAccess: false`) and disable local auth on OpenAI, so keys can't be used at all.
+
 ## Later Steps
 
 - Add Key Vault and monitoring to infra (optionally combine into one `main.bicep` with modules).
-- Store the keys in a Kubernetes Secret, then deploy backend-api and ingestion-worker.
 - Add a deploy-to-AKS GitHub Actions workflow (images tagged with the commit SHA).
 - Add ingress with HTTPS (NGINX + cert-manager).

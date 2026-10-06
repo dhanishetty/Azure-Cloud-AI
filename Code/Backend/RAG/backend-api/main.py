@@ -3,8 +3,8 @@ import os
 import re
 import uuid
 
-from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import ResourceNotFoundError
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery
 from azure.storage.blob import BlobServiceClient
@@ -20,15 +20,12 @@ CHUNK_OVERLAP = 150
 RETRIEVAL_METHOD = "Hybrid search (vector + keyword, fused with RRF)"
 DOC_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
-STORAGE_CONNECTION_STRING = os.environ["STORAGE_CONNECTION_STRING"]
+STORAGE_ACCOUNT_NAME = os.environ["STORAGE_ACCOUNT_NAME"]
 BLOB_CONTAINER = os.environ.get("BLOB_CONTAINER", "documents")
 QUEUE_NAME = os.environ.get("QUEUE_NAME", "ingest-jobs")
 SEARCH_ENDPOINT = os.environ["SEARCH_ENDPOINT"]
 SEARCH_INDEX = os.environ.get("SEARCH_INDEX", "documents-index")
-SEARCH_QUERY_KEY = os.environ["SEARCH_QUERY_KEY"]
-SEARCH_ADMIN_KEY = os.environ["SEARCH_ADMIN_KEY"]
 OPENAI_ENDPOINT = os.environ["OPENAI_ENDPOINT"]
-OPENAI_KEY = os.environ["OPENAI_KEY"]
 OPENAI_API_VERSION = os.environ.get("OPENAI_API_VERSION", "2025-04-01-preview")
 CHAT_DEPLOYMENT = os.environ["OPENAI_CHAT_DEPLOYMENT"]
 EMBED_DEPLOYMENT = os.environ["OPENAI_EMBED_DEPLOYMENT"]
@@ -36,11 +33,16 @@ EMBED_DIMENSIONS = os.environ.get("EMBED_DIMENSIONS", "1536")
 CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", CHAT_DEPLOYMENT)
 EMBED_MODEL = os.environ.get("OPENAI_EMBED_MODEL", EMBED_DEPLOYMENT)
 
-container = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING).get_container_client(BLOB_CONTAINER)
-queue = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, QUEUE_NAME)
-search = SearchClient(SEARCH_ENDPOINT, SEARCH_INDEX, AzureKeyCredential(SEARCH_QUERY_KEY))
-search_admin = SearchClient(SEARCH_ENDPOINT, SEARCH_INDEX, AzureKeyCredential(SEARCH_ADMIN_KEY))
-openai = AzureOpenAI(azure_endpoint=OPENAI_ENDPOINT, api_key=OPENAI_KEY, api_version=OPENAI_API_VERSION)
+# One identity for everything: workload identity on AKS, `az login` locally
+credential = DefaultAzureCredential()
+container = BlobServiceClient(f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net", credential).get_container_client(BLOB_CONTAINER)
+queue = QueueClient(f"https://{STORAGE_ACCOUNT_NAME}.queue.core.windows.net", QUEUE_NAME, credential)
+search = SearchClient(SEARCH_ENDPOINT, SEARCH_INDEX, credential)
+openai = AzureOpenAI(
+    azure_endpoint=OPENAI_ENDPOINT,
+    azure_ad_token_provider=get_bearer_token_provider(credential, "https://cognitiveservices.azure.com/.default"),
+    api_version=OPENAI_API_VERSION,
+)
 
 SYSTEM_PROMPT = (
     "You answer questions about a single uploaded PDF using only the context excerpts provided. "
@@ -123,11 +125,11 @@ def list_documents():
 def delete_chunks(doc_id: str) -> None:
     while True:
         results = list(
-            search_admin.search(search_text="*", filter=f"doc_id eq '{doc_id}'", select=["id"], top=1000)
+            search.search(search_text="*", filter=f"doc_id eq '{doc_id}'", select=["id"], top=1000)
         )
         if not results:
             return
-        search_admin.delete_documents(documents=[{"id": r["id"]} for r in results])
+        search.delete_documents(documents=[{"id": r["id"]} for r in results])
 
 
 @app.delete("/documents/{doc_id}", status_code=204)
