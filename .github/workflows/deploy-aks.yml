@@ -1,0 +1,32 @@
+name: Deploy AKS (infra)
+
+# Manual only: the cluster costs money while running
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RG: rg-portfolio
+  ACR_NAME: ${{ vars.ACR_NAME }}
+
+jobs:
+  deploy-aks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy AKS with Bicep
+        run: |
+          az deployment group create \
+            -g $RG \
+            -f infra/aks.bicep \
+            -p acrName=$ACR_NAME
