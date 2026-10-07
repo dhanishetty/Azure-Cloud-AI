@@ -1,0 +1,15 @@
+# Helm values for the Traefik ingress controller (installed once by hand, see implementation.md Step 11)
+service:
+  annotations:
+    # Gives the load balancer's public IP a free DNS name:
+    #   azure-cloud-ai.eastus.cloudapp.azure.com
+    # The label must be unique in the region. If it is taken, change it here AND in k8s/ingress.yaml.
+    service.beta.kubernetes.io/azure-dns-label-name: "azure-cloud-ai"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 128Mi

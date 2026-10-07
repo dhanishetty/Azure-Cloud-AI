@@ -16,7 +16,8 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | 7 | Deploy frontend to AKS | Done |
 | 8 | Deploy Storage, AI Search and OpenAI | Done |
 | 9 | Deploy backend and worker with managed identity | Done |
-| 10 | Deploy to AKS automatically (CI/CD) | In progress |
+| 10 | Deploy to AKS automatically (CI/CD) | Done |
+| 11 | HTTPS and a stable URL | In progress |
 
 ## Files Created
 
@@ -38,6 +39,9 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | `k8s/backend-api.yaml` | Backend Deployment (managed identity, settings from `app-config`) |
 | `k8s/ingestion-worker.yaml` | Worker Deployment (managed identity, settings from `app-config`) |
 | `.github/workflows/deploy-app.yml` | Deploys the SHA-tagged images to AKS after each successful build |
+| `k8s/platform/traefik-values.yaml` | Traefik ingress settings (DNS label, small limits) |
+| `k8s/platform/cluster-issuers.yaml` | Let's Encrypt staging and production issuers |
+| `k8s/ingress.yaml` | HTTPS Ingress for the app |
 
 ## Step 1: GitHub Repo
 
@@ -928,9 +932,210 @@ The namespace and ServiceAccounts are not applied by the pipeline. They are one-
 - **Rollout times out:** a pod isn't becoming ready. Run `kubectl get pods -n rag-app` and `kubectl logs deployment/<name> -n rag-app`.
 - **Manual run uses the wrong tag:** with no `image_tag`, it uses the latest commit SHA, which may not have been built yet. Enter a tag that exists.
 
+---
+
+---
+
+## Step 11: HTTPS and a Stable URL
+
+**Why:** the site is plain HTTP on a bare IP that can change after a stop and start. This step gives it a fixed hostname and a free Let's Encrypt certificate.
+
+**Result:** `https://azure-cloud-ai.eastus.cloudapp.azure.com`
+
+**Choices I made**
+
+| Choice | Reason |
+|---|---|
+| Traefik ingress controller (Helm) | Light on my single small node. `ingress-nginx` was retired in March 2026, and Microsoft's NGINX add-on is only supported through November 2026. |
+| Not the AKS Gateway API add-on | It's Microsoft's recommended future path (Istio-based, GA), but it's likely heavier for one small node and its HTTPS setup is manual (Key Vault). Worth a later upgrade. |
+| cert-manager + Let's Encrypt | Free certificates that renew automatically |
+| Azure DNS label hostname | Free (`<label>.<region>.cloudapp.azure.com`). A custom domain can replace it later. |
+
+**How the pieces fit together**
+
+| Piece | Role |
+|---|---|
+| Traefik | Receives traffic from a new public IP (load balancer) and routes it by hostname and path |
+| DNS label on the Traefik Service | Gives that IP the name `azure-cloud-ai.eastus.cloudapp.azure.com` |
+| cert-manager | Proves to Let's Encrypt that I own the hostname (HTTP-01 challenge through Traefik), then stores the certificate in a Secret and renews it |
+| `ClusterIssuer` | Tells cert-manager which Let's Encrypt server to use (staging for tests, prod for real) |
+| `Ingress` | Maps the hostname to the `frontend` Service and asks for a certificate. The frontend's nginx already forwards `/api` to the backend. |
+
+**Files added** (in `k8s/`)
+
+| File | Purpose |
+|---|---|
+| `platform/traefik-values.yaml` | Traefik settings: DNS label annotation and small resource limits |
+| `platform/cluster-issuers.yaml` | Let's Encrypt staging and production issuers (needs my email) |
+| `ingress.yaml` | HTTPS Ingress for the app |
+
+`platform/` is a subfolder on purpose, so `kubectl apply -f k8s/` doesn't apply the issuers before cert-manager exists. Traefik and cert-manager are one-time cluster setup, so the pipeline doesn't manage them.
+
+**Before starting:** the cluster must be running, and I need Helm.
+```powershell
+az aks start -g rg-portfolio -n aks-azure-cloud-ai
+kubectl get pods -n rag-app
+helm version
+```
+If `helm` isn't found, install it with one of these, then reopen the terminal and run `helm version` again:
+
+| Option | Command | Note |
+|---|---|---|
+| winget | `winget install Helm.Helm` | Not installed on my machine (`winget` isn't recognized) |
+| Chocolatey | `choco install kubernetes-helm -y` | Works on my machine. Run PowerShell as Administrator. |
+
+| Command | What it does |
+|---|---|
+| `az aks start` | Starts the stopped cluster (a few minutes) |
+| `kubectl get pods -n rag-app` | Checks the three app pods are `Running` again |
+| `helm version` | Checks Helm is installed (Helm installs packaged apps into Kubernetes) |
+
+1. **Install Traefik:**
+   ```powershell
+   helm repo add traefik https://traefik.github.io/charts
+   helm repo update
+   helm install traefik traefik/traefik -n traefik --create-namespace -f k8s/platform/traefik-values.yaml
+   kubectl get service traefik -n traefik -w
+   ```
+   Wait for `EXTERNAL-IP` to show an IP, then press Ctrl+C.
+
+   | Command | What it does |
+   |---|---|
+   | `helm repo add traefik ...` | Registers Traefik's chart repository |
+   | `helm repo update` | Refreshes the list of available charts |
+   | `helm install traefik traefik/traefik -n traefik --create-namespace -f ...` | Installs Traefik into its own namespace, using my values file |
+   | `kubectl get service traefik -n traefik -w` | Watches the new load balancer get its public IP |
+
+---
+
+2. **Check the hostname resolves to that IP:**
+   ```powershell
+   nslookup azure-cloud-ai.eastus.cloudapp.azure.com
+   ```
+   The address must match the `EXTERNAL-IP` above. If the name isn't found, the DNS label may be taken: change it in `traefik-values.yaml` **and** `ingress.yaml`, then run `helm upgrade traefik traefik/traefik -n traefik -f k8s/platform/traefik-values.yaml`.
+
+   | Command | What it does |
+   |---|---|
+   | `nslookup <hostname>` | Looks up the IP address a name points to |
+
+---
+
+3. **Install cert-manager:**
+   ```powershell
+   helm repo add jetstack https://charts.jetstack.io
+   helm repo update
+   helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true
+   kubectl get pods -n cert-manager -w
+   ```
+   Wait until all three pods show `1/1 Running`, then press Ctrl+C.
+
+   | Command | What it does |
+   |---|---|
+   | `helm repo add jetstack ...` | Registers cert-manager's chart repository |
+   | `helm install cert-manager ... --set crds.enabled=true` | Installs cert-manager and its custom resource types (`Certificate`, `ClusterIssuer`) |
+   | `kubectl get pods -n cert-manager -w` | Waits for cert-manager's pods to start |
+
+---
+
+4. **Create the issuers.** First open `k8s/platform/cluster-issuers.yaml` and replace both `<your-email>` values with my email. Then:
+   ```powershell
+   kubectl apply -f k8s/platform/cluster-issuers.yaml
+   kubectl get clusterissuer
+   ```
+   Both issuers must show `READY` `True`.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl apply -f k8s/platform/cluster-issuers.yaml` | Creates the Let's Encrypt staging and production issuers (registers an account with Let's Encrypt) |
+   | `kubectl get clusterissuer` | Shows whether each issuer is ready |
+
+---
+
+5. **Apply the Ingress (staging certificate first):**
+   ```powershell
+   kubectl apply -f k8s/ingress.yaml
+   kubectl get certificate -n rag-app -w
+   ```
+   Wait for `READY` `True` (usually 1-2 minutes), then press Ctrl+C. Test (`-k` skips the check, because staging certificates aren't trusted):
+   ```powershell
+   curl.exe -k -I https://azure-cloud-ai.eastus.cloudapp.azure.com
+   ```
+   Expect `HTTP/2 200`.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl apply -f k8s/ingress.yaml` | Creates the Ingress. cert-manager sees its annotation and requests a certificate. |
+   | `kubectl get certificate -n rag-app -w` | Watches the certificate until it's issued |
+   | `curl.exe -k -I https://...` | Requests only the headers over HTTPS and ignores the untrusted staging certificate |
+
+---
+
+6. **Switch to the production certificate.** First **edit and save** `k8s/ingress.yaml`: change line 10 to `cert-manager.io/cluster-issuer: letsencrypt-prod`. Then:
+   ```powershell
+   kubectl apply -f k8s/ingress.yaml
+   kubectl delete secret app-tls -n rag-app
+   kubectl get certificate -n rag-app -w
+   ```
+   Wait for `READY` `True` again. `apply` must say `configured`. If it says `unchanged`, the file still has `letsencrypt-staging` and nothing was switched.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl apply -f k8s/ingress.yaml` | Points the Ingress at the production issuer |
+   | `kubectl delete secret app-tls -n rag-app` | Deletes the staging certificate so cert-manager issues a real one |
+
+   **Check it's production:**
+   ```powershell
+   kubectl get certificate app-tls -n rag-app -o jsonpath="{.spec.issuerRef.name}"
+   ```
+   It must print `letsencrypt-prod`.
+
+   | Part | What it does |
+   |---|---|
+   | `-o jsonpath="{.spec.issuerRef.name}"` | Prints only the name of the issuer the certificate uses |
+
+   **Mistake I made:** I ran `apply` without changing the file (`unchanged`), then deleted the secret. cert-manager just issued another staging certificate, so the browser still said "not safe". The `unchanged` message was the clue.
+
+---
+
+7. **Test in the browser:** open `https://azure-cloud-ai.eastus.cloudapp.azure.com`. It should show a padlock with no warning. Upload a PDF and ask a question to confirm `/api` works through HTTPS.
+
+---
+
+8. **Make the frontend internal and drop its old public IP.** In `k8s/frontend.yaml`, change the Service `type: LoadBalancer` to `type: ClusterIP`. Then commit and push so the pipeline deploys it:
+   ```powershell
+   git add .
+   git commit -m "Add HTTPS ingress with Traefik and cert-manager"
+   git push
+   kubectl get services -n rag-app
+   ```
+   After the deploy finishes, `frontend` should show type `ClusterIP` and no `EXTERNAL-IP`. The old IP is released, which saves a little money and removes the unencrypted entry point.
+
+   | Command | What it does |
+   |---|---|
+   | `git add .`, `git commit -m "..."`, `git push` | Stage, snapshot and upload the changes. The pipeline deploys `frontend.yaml`. |
+   | `kubectl get services -n rag-app` | Lists Services with their types and external IPs |
+
+**Check**
+- `https://azure-cloud-ai.eastus.cloudapp.azure.com` loads with a valid certificate.
+- `kubectl get certificate -n rag-app` shows `READY` `True`.
+- Upload and Q&A work over HTTPS.
+- The `frontend` Service no longer has a public IP.
+
+**Troubleshooting**
+- **Certificate stays `READY False`:** run `kubectl describe certificate app-tls -n rag-app`, then `kubectl get challenges -A` and `kubectl describe challenge -A`. Usually DNS doesn't point to the Traefik IP yet, or the hostname is wrong.
+- **`EXTERNAL-IP` stays `<pending>` on Traefik:** run `kubectl describe service traefik -n traefik` and read the Events. A taken DNS label shows up here.
+- **`404 page not found` from Traefik:** the Ingress host doesn't match the URL, or `ingressClassName` isn't `traefik`. Run `kubectl describe ingress app -n rag-app`.
+- **Browser says "not safe" or warns about the certificate:** it's still the staging certificate. Complete item 6, make sure `apply` says `configured` (not `unchanged`), and check the issuer prints `letsencrypt-prod`. Then reopen the page in a private window, because browsers cache the warning.
+- **Let's Encrypt rate limit errors:** wait, and use the staging issuer for tests.
+- **`/api` returns 502 over HTTPS:** the backend pod isn't ready. Check its logs (Step 9).
+- **Site unreachable after a stop and start:** the cluster is starting. Wait, then check `kubectl get pods -A`.
+
+**Save money:** Traefik's load balancer IP is the only public IP now. Stopping the cluster (`az aks stop`) takes the site offline, as before.
+
+**Later improvements:** redirect HTTP to HTTPS, add a custom domain (point a CNAME at the Azure hostname and add it to the Ingress), and try the AKS Gateway API add-on.
+
 ## Later Steps
 
 - Add Key Vault and monitoring to infra (optionally combine into one `main.bicep` with modules).
-- Add HTTPS and a stable hostname with a current ingress option (ingress-nginx was retired).
 - Add monitoring (Container Insights, Application Insights) with a cost cap.
 - Harden: disable storage shared keys and OpenAI local auth.

@@ -1,0 +1,27 @@
+# Public entry point: HTTPS for the whole app. The frontend's nginx forwards /api to backend-api,
+# so one route to the frontend is enough.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  namespace: rag-app
+  annotations:
+    # Start with staging, switch to letsencrypt-prod once it works (implementation.md Step 11)
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - azure-cloud-ai.eastus.cloudapp.azure.com
+      secretName: app-tls
+  rules:
+    - host: azure-cloud-ai.eastus.cloudapp.azure.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
