@@ -45,7 +45,7 @@ metadata:
   name: frontend
   namespace: rag-app
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector:
     app: frontend
   ports:
