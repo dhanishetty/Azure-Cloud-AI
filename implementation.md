@@ -17,7 +17,7 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | 8 | Deploy Storage, AI Search and OpenAI | Done |
 | 9 | Deploy backend and worker with managed identity | Done |
 | 10 | Deploy to AKS automatically (CI/CD) | Done |
-| 11 | HTTPS and a stable URL | In progress |
+| 11 | HTTPS and a stable URL | Done |
 | 12 | Monitoring | Done |
 | 13 | Hardening (no keys, HTTPS only) | In progress |
 
@@ -1249,6 +1249,19 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
 
    The connection string lets a client send telemetry but not read it. It is lower risk than a key, but I still keep it out of git.
 
+   **Verify item 4:**
+   ```powershell
+   (kubectl get configmap app-config -n rag-app -o json | ConvertFrom-Json).data.PSObject.Properties.Name
+   kubectl get pods -n rag-app
+   ```
+   The list of key names must include `APPLICATIONINSIGHTS_CONNECTION_STRING`, and `backend-api` and `ingestion-worker` must be `Running` with an age newer than the restart. If the key is missing, the apps skip telemetry on purpose, so there will be nothing to see. Re-run the commands in item 4. If a pod crashes, run `kubectl logs deployment/backend-api -n rag-app --tail=30`.
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl get configmap app-config -n rag-app -o json \| ConvertFrom-Json` | Reads the ConfigMap as an object |
+   | `.data.PSObject.Properties.Name` | Lists only the key names, not the values, so no connection string is printed |
+   | `kubectl get pods -n rag-app` | Shows pod status and age, to confirm they restarted |
+
 ---
 
 5. **Generate some traffic, then look at the data** (telemetry takes 2-5 minutes to appear). Open `https://azure-cloud-ai.eastus.cloudapp.azure.com`, upload a PDF, and ask a question or two. Then:
@@ -1268,6 +1281,8 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
    | `az monitor app-insights query ... --analytics-query "..."` | Runs a KQL query on the telemetry. This one counts requests by endpoint and status code. |
    | `az monitor log-analytics workspace show ... customerId` | Gets the ID the log query command needs |
    | `az monitor log-analytics query -w ...` | Runs a KQL query on the cluster's container logs |
+
+   **Verify item 5:** the `requests` query must return rows listing my endpoints (for example `POST /ask`, `POST /documents`, `GET /health`) with status codes. In the portal, go to resource group **rg-portfolio** > **appi-azure-cloud-ai** and open **Application map** (backend and its dependencies), **Transaction search** (individual requests), **Failures** and **Performance**. If there are no rows, wait a few more minutes, then re-check the verification for item 4.
 
 ---
 
