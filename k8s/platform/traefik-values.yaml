@@ -13,3 +13,13 @@ resources:
   limits:
     cpu: 300m
     memory: 128Mi
+
+# Redirect all plain HTTP traffic to HTTPS (Step 13)
+ports:
+  web:
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true

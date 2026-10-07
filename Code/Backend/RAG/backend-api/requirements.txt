@@ -6,3 +6,4 @@ azure-storage-queue>=12.10
 azure-search-documents>=11.6.0
 openai>=1.50
 azure-identity>=1.17
+azure-monitor-opentelemetry>=1.6

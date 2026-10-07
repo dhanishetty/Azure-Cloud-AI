@@ -1,7 +1,18 @@
 import json
+import logging
 import os
 import re
 import uuid
+
+# Application Insights telemetry. Must run before FastAPI is imported so requests are traced.
+# Skipped when the connection string is not set (for example, local runs).
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor
+
+    configure_azure_monitor()
+
+# The Azure SDK logs every HTTP request at INFO; keep that out of the logs (and out of the bill)
+logging.getLogger("azure").setLevel(logging.WARNING)
 
 from azure.core.exceptions import ResourceNotFoundError
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider

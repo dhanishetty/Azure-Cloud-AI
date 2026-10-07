@@ -28,6 +28,16 @@ from pypdf import PdfReader
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("ingestion-worker")
 
+# The Azure SDK logs every HTTP request at INFO; keep that out of the logs (and out of the bill)
+logging.getLogger("azure").setLevel(logging.WARNING)
+
+# Application Insights telemetry. Runs after basicConfig, otherwise the log format and level would be ignored.
+# Skipped when the connection string is not set (for example, local runs).
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor
+
+    configure_azure_monitor()
+
 STORAGE_ACCOUNT_NAME = os.environ["STORAGE_ACCOUNT_NAME"]
 BLOB_CONTAINER = os.environ.get("BLOB_CONTAINER", "documents")
 QUEUE_NAME = os.environ.get("QUEUE_NAME", "ingest-jobs")

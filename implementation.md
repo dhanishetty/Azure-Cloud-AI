@@ -18,6 +18,8 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | 9 | Deploy backend and worker with managed identity | Done |
 | 10 | Deploy to AKS automatically (CI/CD) | Done |
 | 11 | HTTPS and a stable URL | In progress |
+| 12 | Monitoring | Done |
+| 13 | Hardening (no keys, HTTPS only) | In progress |
 
 ## Files Created
 
@@ -42,6 +44,8 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | `k8s/platform/traefik-values.yaml` | Traefik ingress settings (DNS label, small limits) |
 | `k8s/platform/cluster-issuers.yaml` | Let's Encrypt staging and production issuers |
 | `k8s/ingress.yaml` | HTTPS Ingress for the app |
+| `infra/monitoring.bicep` | Log Analytics workspace (daily cap) and Application Insights |
+| `.github/workflows/deploy-monitoring.yml` | Deploys the monitoring resources (manual run) |
 
 ## Step 1: GitHub Repo
 
@@ -1134,8 +1138,275 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
 
 **Later improvements:** redirect HTTP to HTTPS, add a custom domain (point a CNAME at the Azure hostname and add it to the Ingress), and try the AKS Gateway API add-on.
 
+---
+
+---
+
+## Step 12: Monitoring
+
+**Why:** to see what the app and cluster are doing: requests, failures, latency, and container logs. It also helps debugging when something breaks.
+
+**What I'm adding**
+
+| Piece | Shows | Cost control |
+|---|---|---|
+| Log Analytics workspace | Stores the logs | Daily cap of 0.2 GB, 30-day retention |
+| Application Insights | Request counts, failures, latency, dependency calls from `backend-api` and the worker | Sends into the same capped workspace |
+| Container Insights | Pod and node metrics and container logs from AKS | Same capped workspace |
+| Budget alert | Emails me before spending runs away | Free |
+
+**Files added or changed**
+
+| File | Change |
+|---|---|
+| `infra/monitoring.bicep` | New: Log Analytics workspace (with daily cap) and Application Insights |
+| `.github/workflows/deploy-monitoring.yml` | New: deploys `monitoring.bicep` (manual run) |
+| `backend-api/main.py`, `ingestion-worker/worker.py` | Changed: start Application Insights when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set, and silence the Azure SDK's per-request INFO logs (they would flood the logs and cost money) |
+| both `requirements.txt` | Added `azure-monitor-opentelemetry` |
+
+**Before starting:** the cluster must be running (`az aks start -g rg-portfolio -n aks-azure-cloud-ai`).
+
+1. **Register the resource providers** (once per subscription):
+   ```powershell
+   az provider register --namespace Microsoft.OperationalInsights
+   az provider register --namespace Microsoft.Insights
+   az provider register --namespace Microsoft.OperationsManagement
+   az provider show --namespace Microsoft.OperationalInsights --query registrationState -o tsv
+   ```
+   Wait until each shows `Registered`.
+
+   | Command | What it does |
+   |---|---|
+   | `az provider register ...` | Turns on that Azure service for my subscription |
+   | `az provider show ... -o tsv` | Prints the registration state |
+
+---
+
+2. **Deploy the monitoring resources.** Commit and push the new files, then run the workflow:
+   ```powershell
+   git add .
+   git commit -m "Add monitoring: Log Analytics, Application Insights, telemetry in apps"
+   git push
+   ```
+   Repo > **Actions** tab > **Deploy monitoring (infra)** > **Run workflow** > `main`.
+
+   | Command | What it does |
+   |---|---|
+   | `git add .` | Stages all new and changed files |
+   | `git commit -m "..."` | Saves them as a snapshot in local history |
+   | `git push` | Uploads the commit. Because `Code/**` changed, the build and deploy workflows also run. |
+
+   **Note:** this push deploys the new app code, which has no connection string yet. That is fine: telemetry is skipped until item 4 adds it.
+
+   Verify:
+   ```powershell
+   az resource list -g rg-portfolio --query "[?contains(name,'azure-cloud-ai')].{name:name, type:type}" -o table
+   ```
+   Expect `log-azure-cloud-ai` and `appi-azure-cloud-ai`.
+
+   | Command | What it does |
+   |---|---|
+   | `az resource list -g rg-portfolio --query ...` | Lists resources in the group whose names contain `azure-cloud-ai` |
+
+---
+
+3. **Turn on Container Insights for AKS:**
+   ```powershell
+   $wsId = az monitor log-analytics workspace show -g rg-portfolio -n log-azure-cloud-ai --query id -o tsv
+   az aks enable-addons -a monitoring -g rg-portfolio -n aks-azure-cloud-ai --workspace-resource-id $wsId
+   kubectl get pods -n kube-system | Select-String ama-logs
+   ```
+   Wait until the `ama-logs` pods show `Running`.
+
+   | Command | What it does |
+   |---|---|
+   | `az monitor log-analytics workspace show ... --query id` | Gets the workspace's full resource ID |
+   | `az aks enable-addons -a monitoring ... --workspace-resource-id` | Installs the monitoring agent (`ama-logs` pods) on the cluster and sends data to the workspace |
+   | `kubectl get pods -n kube-system \| Select-String ama-logs` | Checks the agent pods are running |
+
+   **Watch node capacity:** the agent needs some CPU and memory, and my node is small. If a pod shows `Pending`, run `kubectl describe pod <name> -n rag-app` and read the Events. If it says `Insufficient cpu` or `Insufficient memory`, lower the agent's cost by disabling it again (`az aks disable-addons -a monitoring -g rg-portfolio -n aks-azure-cloud-ai`) or add a node.
+
+   **Do not re-run `Deploy AKS (infra)` after this.** `aks.bicep` doesn't include the add-on, so the deploy may remove it. If that happens, run the `enable-addons` command again.
+
+---
+
+4. **Give the apps the Application Insights connection string.** Get it and add it to the `app-config` ConfigMap:
+   ```powershell
+   $conn = az monitor app-insights component show -g rg-portfolio -a appi-azure-cloud-ai --query connectionString -o tsv
+   kubectl create configmap app-config -n rag-app --from-literal="APPLICATIONINSIGHTS_CONNECTION_STRING=$conn" --dry-run=client -o yaml | kubectl apply -f -
+   kubectl rollout restart deployment/backend-api deployment/ingestion-worker -n rag-app
+   Remove-Variable conn
+   ```
+   If `az monitor app-insights` asks to install an extension, answer `Y`.
+
+   | Command | What it does |
+   |---|---|
+   | `az monitor app-insights component show ... --query connectionString` | Gets the connection string the apps use to send telemetry |
+   | `kubectl create configmap ... --dry-run=client -o yaml` | Builds the ConfigMap YAML without creating it |
+   | `\| kubectl apply -f -` | Applies it, adding this one key and keeping the existing keys |
+   | `kubectl rollout restart deployment/...` | Restarts the pods so they read the new setting |
+   | `Remove-Variable conn` | Clears the value from my terminal session |
+
+   The connection string lets a client send telemetry but not read it. It is lower risk than a key, but I still keep it out of git.
+
+---
+
+5. **Generate some traffic, then look at the data** (telemetry takes 2-5 minutes to appear). Open `https://azure-cloud-ai.eastus.cloudapp.azure.com`, upload a PDF, and ask a question or two. Then:
+   ```powershell
+   az monitor app-insights query -g rg-portfolio --app appi-azure-cloud-ai --analytics-query "requests | summarize count() by name, resultCode" -o table
+   ```
+   Or in the portal: **appi-azure-cloud-ai** > **Application map**, **Failures**, **Performance**, **Live metrics**.
+
+   Container logs (needs item 3):
+   ```powershell
+   $wsCustomerId = az monitor log-analytics workspace show -g rg-portfolio -n log-azure-cloud-ai --query customerId -o tsv
+   az monitor log-analytics query -w $wsCustomerId --analytics-query "ContainerLogV2 | where PodNamespace == 'rag-app' | project TimeGenerated, PodName, LogMessage | take 10" -o table
+   ```
+
+   | Command | What it does |
+   |---|---|
+   | `az monitor app-insights query ... --analytics-query "..."` | Runs a KQL query on the telemetry. This one counts requests by endpoint and status code. |
+   | `az monitor log-analytics workspace show ... customerId` | Gets the ID the log query command needs |
+   | `az monitor log-analytics query -w ...` | Runs a KQL query on the cluster's container logs |
+
+---
+
+6. **Set a budget alert** (portal): **Cost Management** > **Budgets** > **Add**. Scope: the subscription. Amount: for example $30 per month. Alerts at 50%, 80% and 100%, sent to my email. This protects me from a forgotten cluster, an OpenAI usage spike, or log growth.
+
+**Check**
+- `log-azure-cloud-ai` and `appi-azure-cloud-ai` exist.
+- `ama-logs` pods are `Running` and all app pods are still `Running`.
+- The `requests` query returns rows after I used the site.
+- A budget with email alerts exists.
+
+**Troubleshooting**
+- **Query returns no rows:** wait a few minutes, make sure the pods restarted after item 4, and check `kubectl logs deployment/backend-api -n rag-app` for errors. Confirm the key exists with `kubectl get configmap app-config -n rag-app -o yaml`.
+- **Pods in `CrashLoopBackOff` after the code change:** the logs usually show an import error. Confirm the image build finished and `azure-monitor-opentelemetry` is in `requirements.txt`.
+- **Pods `Pending`, `Insufficient cpu/memory`:** see the capacity note in item 3.
+- **`MissingSubscriptionRegistration`:** item 1 isn't finished.
+- **Logs stop for the day:** the 0.2 GB daily cap was reached. That is the cap working. Raise `dailyQuotaGb` in `monitoring.bicep` if needed.
+
+**Save money:** monitoring costs mostly come from log volume, which the daily cap limits. The first 5 GB of ingestion per month is typically free, but check current pricing.
+
+---
+
+---
+
+## Step 13: Hardening
+
+**Why:** the apps already use managed identity, so nothing needs the account keys any more. This step turns the keys off, which makes "no keys" a rule Azure enforces instead of just a habit. It also forces all web traffic onto HTTPS.
+
+**What changes**
+
+| Change | Where | Effect |
+|---|---|---|
+| `allowSharedKeyAccess: false` | Storage account (`infra/data-ai.bicep`) | Account keys and connection strings stop working. Only Entra ID (managed identity) works. |
+| `disableLocalAuth: true` | Azure OpenAI account (`infra/data-ai.bicep`) | API keys stop working. Only Entra ID works. |
+| HTTP to HTTPS redirect | Traefik (`k8s/platform/traefik-values.yaml`) | `http://...` is permanently redirected to `https://...` |
+
+The shared AI Search service is not changed. Another project still uses its API keys.
+
+**Before starting:** the cluster must be running, and the app must work over HTTPS (upload a PDF and ask a question). If it works now, it will keep working, because the apps never used keys.
+
+1. **Commit and push the changes:**
+   ```powershell
+   git add .
+   git commit -m "Harden: disable storage keys and OpenAI local auth, redirect HTTP to HTTPS"
+   git push
+   ```
+
+   | Command | What it does |
+   |---|---|
+   | `git add .` | Stages all changed files |
+   | `git commit -m "..."` | Saves them as a snapshot in local history |
+   | `git push` | Uploads the commit to GitHub |
+
+---
+
+2. **Re-run the Storage, Search and OpenAI deployment:** repo > **Actions** tab > **Deploy Storage, Search and OpenAI (infra)** > **Run workflow** > `main`. It updates the two accounts in place. The workflow still passes `createSearch=false`, so the shared search service is untouched.
+
+---
+
+3. **Verify the keys are off:**
+   ```powershell
+   $st = az storage account list -g rg-portfolio --query "[0].name" -o tsv
+   $oai = az cognitiveservices account list -g rg-portfolio --query "[?kind=='OpenAI'].name | [0]" -o tsv
+
+   az storage account show -g rg-portfolio -n $st --query allowSharedKeyAccess -o tsv
+   az cognitiveservices account show -g rg-portfolio -n $oai --query properties.disableLocalAuth -o tsv
+   ```
+   The first must print `false`, the second `true`.
+
+   Prove it by trying to use a key. Both commands should now fail:
+   ```powershell
+   az storage container list --account-name $st --auth-mode key
+   az cognitiveservices account keys list -g rg-portfolio -n $oai
+   ```
+   Expect errors such as `KeyBasedAuthenticationNotPermitted` and a message that local authentication is disabled.
+
+   | Command | What it does |
+   |---|---|
+   | `az storage account show ... --query allowSharedKeyAccess` | Shows whether account keys are allowed |
+   | `az cognitiveservices account show ... disableLocalAuth` | Shows whether OpenAI API keys are disabled |
+   | `az storage container list ... --auth-mode key` | Tries to read storage using the account key. It should be refused. |
+   | `az cognitiveservices account keys list` | Tries to fetch the OpenAI keys. It should be refused. |
+
+---
+
+4. **Check the app still works:** open `https://azure-cloud-ai.eastus.cloudapp.azure.com`, upload a PDF, wait for `ready`, and ask a question. Also check the pod logs have no authentication errors:
+   ```powershell
+   kubectl logs deployment/backend-api -n rag-app --tail=30
+   kubectl logs deployment/ingestion-worker -n rag-app --tail=30
+   ```
+
+   | Command | What it does |
+   |---|---|
+   | `kubectl logs deployment/<name> -n rag-app --tail=30` | Prints the last 30 log lines |
+
+---
+
+5. **Turn on the HTTP to HTTPS redirect:**
+   ```powershell
+   helm upgrade traefik traefik/traefik -n traefik -f k8s/platform/traefik-values.yaml
+   curl.exe -I http://azure-cloud-ai.eastus.cloudapp.azure.com
+   ```
+   The response should be `301 Moved Permanently` or `308 Permanent Redirect` with a `Location:` header starting with `https://`.
+
+   | Command | What it does |
+   |---|---|
+   | `helm upgrade traefik ... -f ...` | Applies the changed values to the existing Traefik install. The public IP and DNS name stay the same. |
+   | `curl.exe -I http://...` | Requests only the headers over plain HTTP, to see the redirect |
+
+---
+
+6. **Optional: browse storage in the portal.** With shared keys off, the portal needs my own Entra ID permission to open the blob container:
+   ```powershell
+   $me = az ad signed-in-user show --query id -o tsv
+   $stId = az storage account show -g rg-portfolio -n $st --query id -o tsv
+   az role assignment create --assignee-object-id $me --assignee-principal-type User --role "Storage Blob Data Reader" --scope $stId
+   ```
+   In the portal, open the container and choose **Switch to Microsoft Entra user account** if it asks.
+
+   | Command | What it does |
+   |---|---|
+   | `az ad signed-in-user show --query id` | Gets my user's object ID |
+   | `az role assignment create ... "Storage Blob Data Reader"` | Lets me read blobs with my own login, scoped to this storage account only |
+
+**Check**
+- `allowSharedKeyAccess` is `false` and `disableLocalAuth` is `true`.
+- Key-based commands are refused.
+- Upload and Q&A still work, with no authentication errors in the logs.
+- `http://` redirects to `https://`.
+
+**Troubleshooting**
+- **`403 AuthorizationPermissionMismatch` or `KeyBasedAuthenticationNotPermitted` from the apps:** something is still using a key or connection string. Check the pod environment (`kubectl get configmap app-config -n rag-app -o yaml`) and the code for `connection_string` or `api_key`.
+- **Workflow fails with `PropertyChangeNotAllowed`:** tell me the exact message. These two properties should be changeable in place.
+- **Redirect loop or certificate renewal fails after the redirect:** check `kubectl get challenges -A`. Let's Encrypt follows redirects, so this is unusual. Roll back by removing the `ports:` block from `traefik-values.yaml` and running `helm upgrade` again.
+- **Old browser tab still shows HTTP:** reload in a private window.
+- **Portal can't list blobs:** do item 6.
+
+**Later improvements:** managed identity for the Search service too (if the old project no longer needs keys), pod security settings (non-root user, read-only filesystem, dropped capabilities), network policies, and Key Vault only if a real secret ever appears.
+
 ## Later Steps
 
-- Add Key Vault and monitoring to infra (optionally combine into one `main.bicep` with modules).
-- Add monitoring (Container Insights, Application Insights) with a cost cap.
-- Harden: disable storage shared keys and OpenAI local auth.
+- Add Key Vault to infra if a real secret appears (optionally combine the Bicep files into one `main.bicep` with modules).
