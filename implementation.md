@@ -19,7 +19,8 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 | 10 | Deploy to AKS automatically (CI/CD) | Done |
 | 11 | HTTPS and a stable URL | Done |
 | 12 | Monitoring | Done |
-| 13 | Hardening (no keys, HTTPS only) | In progress |
+| 13 | Hardening (no keys, HTTPS only) | Done |
+| 14 | Budget alert | Done |
 
 ## Files Created
 
@@ -1422,6 +1423,22 @@ The shared AI Search service is not changed. Another project still uses its API 
 - **Portal can't list blobs:** do item 6.
 
 **Later improvements:** managed identity for the Search service too (if the old project no longer needs keys), pod security settings (non-root user, read-only filesystem, dropped capabilities), network policies, and Key Vault only if a real secret ever appears.
+
+---
+
+---
+
+## Step 14: Budget Alert
+
+**Why:** AKS, OpenAI usage and log volume can grow quietly. A budget emails me before the bill surprises me. It only sends emails: it does not stop spending, so `az aks stop` is still the real protection.
+
+1. Portal (signed in as dhanishetty@gmail.com) > **Cost Management** > **Budgets** > **Add**.
+2. Scope: the subscription. Name: `monthly-budget`. Reset period: monthly.
+3. Amount: a number that would worry me (about $30-40 if the cluster runs all the time).
+4. Alerts: 50%, 80% and 100% of the budget, type **Actual**, sent to my email.
+5. Create.
+
+**Check:** the budget appears in the Budgets list with its three alert conditions.
 
 ## Later Steps
 
