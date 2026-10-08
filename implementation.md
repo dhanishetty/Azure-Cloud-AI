@@ -3,6 +3,27 @@
 Deploy the full app (frontend + backend) on AKS, with GitHub Actions for CI/CD.
 Azure account: **dhanishetty@gmail.com** (not the work account).
 
+## Table of Contents
+
+- [Progress](#progress)
+- [Files Created](#files-created)
+- [Step 1: GitHub Repo](#step-1-github-repo)
+- [Step 2: Azure Identity (OIDC)](#step-2-azure-identity-oidc)
+- [Step 3: Repo Secrets](#step-3-repo-secrets)
+- [Step 4: Repo Variable](#step-4-repo-variable)
+- [Step 5: Run Order](#step-5-run-order) (ACR and image build workflows explained)
+- [Step 6: Deploy AKS](#step-6-deploy-aks) (AKS workflow explained)
+- [Step 7: Deploy the Frontend to AKS](#step-7-deploy-the-frontend-to-aks)
+- [Step 8: Deploy Storage, AI Search and OpenAI](#step-8-deploy-storage-ai-search-and-openai) (data workflow explained)
+- [Step 9: Deploy the Backend and Worker with Managed Identity](#step-9-deploy-the-backend-and-worker-with-managed-identity) (identity workflow explained)
+- [Step 10: Deploy to AKS Automatically (CI/CD)](#step-10-deploy-to-aks-automatically-cicd) (deploy-app workflow explained)
+- [Step 11: HTTPS and a Stable URL](#step-11-https-and-a-stable-url)
+- [Step 12: Monitoring](#step-12-monitoring) (monitoring workflow explained)
+- [Step 13: Hardening](#step-13-hardening)
+- [Step 14: Budget Alert](#step-14-budget-alert)
+- [To Do Before Making the Repo Public](#to-do-before-making-the-repo-public)
+- [Later Steps](#later-steps)
+
 ## Progress
 
 | Step | Task | Status |
@@ -293,6 +314,151 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    ```
    The registry should be listed with SKU `Basic`.
 
+   **The `Deploy ACR (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-acr.yml`.
+
+   <details>
+   <summary><b>1. Name</b></summary>
+
+   ```yaml
+   name: Deploy ACR (infra)
+   ```
+
+   The label shown in the **Actions** tab. It is the name I click to run the workflow.
+
+   </details>
+
+   <details>
+   <summary><b>2. Triggers (<code>on</code>)</b></summary>
+
+   ```yaml
+   on:
+     push:
+       branches: [main]
+       paths: ['infra/**', '.github/workflows/deploy-acr.yml']
+     workflow_dispatch:
+   ```
+
+   When the workflow starts:
+   - **`push` to `main`**, but only if something under `infra/` or this workflow file changed. A change to app code does not trigger it.
+   - **`workflow_dispatch`** adds the **Run workflow** button, so I can start it by hand.
+
+   This is why my first push in Step 1 started a (failed) run: the file was new, and `ACR_NAME` did not exist yet.
+
+   </details>
+
+   <details>
+   <summary><b>3. Permissions</b></summary>
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+   ```
+
+   What the workflow's built-in token may do:
+   - **`id-token: write`** lets the job ask GitHub for an OIDC identity token. Azure checks it against the federated credential from Step 2. Without it, login fails.
+   - **`contents: read`** lets the job download the repo's code.
+
+   Everything else is denied. That is least privilege.
+
+   </details>
+
+   <details>
+   <summary><b>4. Environment variables (<code>env</code>)</b></summary>
+
+   ```yaml
+   env:
+     RG: rg-portfolio
+     LOCATION: eastus
+     ACR_NAME: ${{ vars.ACR_NAME }}
+   ```
+
+   Values the steps below reuse:
+   - **`RG`** and **`LOCATION`** are the resource group name and Azure region, written directly.
+   - **`ACR_NAME`** comes from the repo variable I added in Step 4 (`vars.ACR_NAME`). Keeping it as a variable means the name is not hard-coded in the file.
+
+   Later steps read them as `$RG`, `$LOCATION` and `$ACR_NAME`.
+
+   </details>
+
+   <details>
+   <summary><b>5. Job and runner</b></summary>
+
+   ```yaml
+   jobs:
+     deploy-acr:
+       runs-on: ubuntu-latest
+       steps:
+   ```
+
+   - **`jobs`** holds the work. This workflow has one job, `deploy-acr`.
+   - **`runs-on: ubuntu-latest`** is the temporary Linux machine GitHub starts to run it. It already has the Azure CLI installed, and it is thrown away afterwards.
+   - **`steps`** are the actions below, run in order. If one fails, the rest are skipped.
+
+   </details>
+
+   <details>
+   <summary><b>6. Step: check out the code</b></summary>
+
+   ```yaml
+   - uses: actions/checkout@v4
+   ```
+
+   Downloads the repo onto the runner. It is needed because the Bicep file `infra/acr.bicep` lives in the repo, and a later step reads it.
+
+   </details>
+
+   <details>
+   <summary><b>7. Step: log in to Azure</b></summary>
+
+   ```yaml
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+
+   Signs the runner in to Azure with **OIDC**, using the three repo secrets from Step 3. There is no password. GitHub presents a short-lived token, and Azure accepts it because of the federated credential I created in Step 2 (this is where the `subject` must match). If it fails with `AADSTS700213`, see Step 2, item 3.
+
+   </details>
+
+   <details>
+   <summary><b>8. Step: create the resource group</b></summary>
+
+   ```yaml
+   - name: Create resource group
+     run: az group create -n $RG -l $LOCATION
+   ```
+
+   Creates `rg-portfolio` in `eastus`. If it already exists, the command does nothing and succeeds, so re-running is safe. The registry has to live in a resource group, so this must come first.
+
+   </details>
+
+   <details>
+   <summary><b>9. Step: deploy the registry with Bicep</b></summary>
+
+   ```yaml
+   - name: Deploy ACR with Bicep
+     run: |
+       az deployment group create \
+         -g $RG \
+         -f infra/acr.bicep \
+         -p acrName=$ACR_NAME
+   ```
+
+   Creates the Azure Container Registry from code:
+   - **`az deployment group create`** runs a Bicep deployment inside a resource group.
+   - **`-g $RG`** is the target resource group.
+   - **`-f infra/acr.bicep`** is the file that defines the registry (Basic tier, admin user off).
+   - **`-p acrName=$ACR_NAME`** passes my registry name into the Bicep `acrName` parameter.
+   - The trailing `\` just continues the command on the next line.
+
+   Running it again with the same values changes nothing. That is what makes it infrastructure as code.
+
+   </details>
+
+
    ### Note
    
    **If login fails with `AADSTS700213` (no matching federated identity record):** GitHub may be using the newer subject format with the owner and repo IDs, e.g. `repo:<github-user>@<owner-id>/<repo-name>@<repo-id>:ref:refs/heads/main`. Copy the exact subject from the error message (`presented assertion subject '...'`) into `cred.json` and update the credential:
@@ -309,6 +475,155 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    az acr repository show-tags --name <ACR_NAME> --repository frontend -o table
    ```
    All three repositories should be listed, each tagged with the commit SHA and `latest`.
+
+   **The `Build and push images to ACR` workflow, section by section** (click a section to expand it). The file is `.github/workflows/build-push-images.yml`.
+
+   <details>
+   <summary><b>1. Name</b></summary>
+
+   ```yaml
+   name: Build and push images to ACR
+   ```
+
+   The label shown in the **Actions** tab. It matters beyond looks: `deploy-app.yml` starts "after the workflow named `Build and push images to ACR` succeeds", so if I rename this workflow, the automatic deploy stops firing.
+
+   </details>
+
+   <details>
+   <summary><b>2. Triggers (<code>on</code>)</b></summary>
+
+   ```yaml
+   on:
+     push:
+       branches: [main]
+       paths: ['Code/**', 'k8s/**', '.github/workflows/build-push-images.yml']
+     workflow_dispatch:
+   ```
+
+   When the workflow starts:
+   - **`push` to `main`**, but only if something under `Code/`, `k8s/` or this workflow file changed. Changing only `infra/` or the README does not rebuild the images.
+   - **`workflow_dispatch`** adds the **Run workflow** button for manual runs.
+
+   `k8s/**` is included so that a manifest-only change still flows through to the deploy workflow.
+
+   </details>
+
+   <details>
+   <summary><b>3. Permissions</b></summary>
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+   ```
+
+   What the workflow's built-in token may do:
+   - **`id-token: write`** lets the job ask GitHub for an OIDC identity token, which Azure checks against the federated credential from Step 2.
+   - **`contents: read`** lets the job download the repo's code.
+
+   Everything else is denied.
+
+   </details>
+
+   <details>
+   <summary><b>4. Environment variable (<code>env</code>)</b></summary>
+
+   ```yaml
+   env:
+     ACR_NAME: ${{ vars.ACR_NAME }}
+   ```
+
+   The registry name, read from the repo variable I added in Step 4. Steps use it as `$ACR_NAME`. There is no resource group here because `az acr build` only needs the registry name.
+
+   </details>
+
+   <details>
+   <summary><b>5. Job and runner</b></summary>
+
+   ```yaml
+   jobs:
+     build-push:
+       runs-on: ubuntu-latest
+   ```
+
+   - **`build-push`** is the one job.
+   - **`runs-on: ubuntu-latest`** is the temporary Linux machine GitHub starts for it. The Azure CLI is already installed, and the machine is discarded afterwards. Because the image build happens inside ACR (see the last section), the runner does not need Docker.
+
+   </details>
+
+   <details>
+   <summary><b>6. Matrix: three jobs from one definition</b></summary>
+
+   ```yaml
+   strategy:
+     matrix:
+       include:
+         - image: frontend
+           context: Code/Frontend
+         - image: backend-api
+           context: Code/Backend/RAG/backend-api
+         - image: ingestion-worker
+           context: Code/Backend/RAG/ingestion-worker
+   ```
+
+   GitHub runs the steps once for each entry, in parallel, so there are three jobs:
+   - **`image`** is the name the image gets in ACR.
+   - **`context`** is the folder with that app's `Dockerfile` and source code.
+
+   Adding a new service later means adding one more entry here. The steps below use `${{ matrix.image }}` and `${{ matrix.context }}` to pick up the current entry.
+
+   </details>
+
+   <details>
+   <summary><b>7. Step: check out the code</b></summary>
+
+   ```yaml
+   - uses: actions/checkout@v4
+   ```
+
+   Downloads the repo onto the runner, so the Dockerfiles and source code are there to build.
+
+   </details>
+
+   <details>
+   <summary><b>8. Step: log in to Azure</b></summary>
+
+   ```yaml
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+
+   Signs the runner in to Azure with **OIDC**, using the three repo secrets from Step 3. There is no password: GitHub presents a short-lived token, and Azure accepts it because of the federated credential from Step 2. The `Contributor` role from Step 2 is what lets it push to the registry.
+
+   </details>
+
+   <details>
+   <summary><b>9. Step: build and push the image</b></summary>
+
+   ```yaml
+   - name: Build and push (tagged with commit SHA and latest)
+     run: |
+       az acr build -r $ACR_NAME \
+         -t ${{ matrix.image }}:${{ github.sha }} \
+         -t ${{ matrix.image }}:latest \
+         ${{ matrix.context }}
+   ```
+
+   Builds the image and stores it in the registry:
+   - **`az acr build`** uploads the folder to ACR and builds the image there (ACR Tasks), then saves it in the registry. No Docker install and no separate push step.
+   - **`-r $ACR_NAME`** is the target registry.
+   - **`-t <image>:${{ github.sha }}`** tags the image with the commit SHA. This tag is what the deploy workflow rolls out, so every running version can be traced to a commit and rolled back.
+   - **`-t <image>:latest`** adds a second tag, `latest`, that always points to the newest build.
+   - **`${{ matrix.context }}`** is the folder to build, taken from the matrix entry.
+   - The trailing `\` just continues the command on the next line.
+
+   After this succeeds, `deploy-app.yml` starts automatically.
+
+   </details>
+
 
 **Troubleshooting**
 - **Expected:** the push in Step 1 may have already triggered these workflows before `ACR_NAME` existed, so a red earlier run is normal. Just re-run manually.
@@ -394,6 +709,102 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
 ---
 
 5. **Run `Deploy AKS (infra)`:** GitHub repo > **Actions** tab > **Deploy AKS (infra)** > **Run workflow** > `main`. Takes about 5-10 minutes.
+
+   **The `Deploy AKS (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-aks.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
+
+   <details>
+   <summary><b>1. Name</b></summary>
+
+   ```yaml
+   name: Deploy AKS (infra)
+
+   # Manual only: the cluster costs money while running
+   ```
+
+   The label shown in the **Actions** tab. The comment records why this workflow is manual.
+
+   </details>
+
+   <details>
+   <summary><b>2. Trigger (<code>on</code>)</b></summary>
+
+   ```yaml
+   on:
+     workflow_dispatch:
+   ```
+
+   Only the **Run workflow** button. There is no `push` trigger, unlike the ACR workflow, so editing `aks.bicep` never changes the cluster by accident. I run it on purpose.
+
+   </details>
+
+   <details>
+   <summary><b>3. Permissions, job and runner</b></summary>
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+
+   jobs:
+     deploy-aks:
+       runs-on: ubuntu-latest
+       steps:
+   ```
+
+   Same as the ACR workflow: `id-token: write` lets the job get an OIDC token for the Azure login, `contents: read` lets it download the repo, and the job runs on a temporary Ubuntu machine with the Azure CLI installed.
+
+   </details>
+
+   <details>
+   <summary><b>4. Environment variables (<code>env</code>)</b></summary>
+
+   ```yaml
+   env:
+     RG: rg-portfolio
+     ACR_NAME: ${{ vars.ACR_NAME }}
+   ```
+
+   - **`RG`** is the resource group to deploy into. There is no `LOCATION` and no `az group create` here, because the ACR workflow already created the group.
+   - **`ACR_NAME`** is the repo variable from Step 4. The Bicep file needs it to find the existing registry and grant the cluster the `AcrPull` role on it.
+
+   </details>
+
+   <details>
+   <summary><b>5. Steps: check out and log in</b></summary>
+
+   ```yaml
+   - uses: actions/checkout@v4
+
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+
+   Same as the ACR workflow: download the repo so `infra/aks.bicep` is available, then sign in to Azure with OIDC and the three repo secrets from Step 3.
+
+   </details>
+
+   <details>
+   <summary><b>6. Step: deploy the cluster with Bicep</b></summary>
+
+   ```yaml
+   - name: Deploy AKS with Bicep
+     run: |
+       az deployment group create \
+         -g $RG \
+         -f infra/aks.bicep \
+         -p acrName=$ACR_NAME
+   ```
+
+   - **`-f infra/aks.bicep`** defines the cluster: Free tier, one `Standard_B2s` node, OIDC and Workload Identity turned on, and the `AcrPull` role so nodes can pull images.
+   - **`-p acrName=$ACR_NAME`** passes the registry name into the Bicep parameter.
+   - Creating the role assignment needs `User Access Administrator` on the resource group, which I granted in item 3 of this step. Without it, the deploy fails with `AuthorizationFailed`.
+   - It takes about 5-10 minutes. Running it again changes nothing, but do not re-run it after turning on Container Insights in Step 12, because `aks.bicep` does not include that add-on.
+
+   </details>
+
 
 ---
 
@@ -601,6 +1012,97 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
 
 5. **Run `Deploy Storage, Search and OpenAI (infra)`:** GitHub repo > **Actions** tab > select it > **Run workflow** > `main`. Takes about 3-5 minutes.
 
+   **The `Deploy Storage, Search and OpenAI (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-data-ai.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
+
+   <details>
+   <summary><b>1. Name</b></summary>
+
+   ```yaml
+   name: Deploy Storage, Search and OpenAI (infra)
+   ```
+
+   The label shown in the **Actions** tab. The name still says Search even though the workflow no longer creates one (see section 6).
+
+   </details>
+
+   <details>
+   <summary><b>2. Trigger (<code>on</code>)</b></summary>
+
+   ```yaml
+   on:
+     workflow_dispatch:
+   ```
+
+   Only the **Run workflow** button. I run it on purpose: once to create the resources (Step 8), and again in Step 13 to turn off the account keys.
+
+   </details>
+
+   <details>
+   <summary><b>3. Permissions, job and runner</b></summary>
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+
+   jobs:
+     deploy-data-ai:
+       runs-on: ubuntu-latest
+       steps:
+   ```
+
+   Same as the ACR workflow: `id-token: write` lets the job get an OIDC token for the Azure login, `contents: read` lets it download the repo, and the job runs on a temporary Ubuntu machine with the Azure CLI installed.
+
+   </details>
+
+   <details>
+   <summary><b>4. Environment variable (<code>env</code>)</b></summary>
+
+   ```yaml
+   env:
+     RG: rg-portfolio
+   ```
+
+   Only the resource group. This workflow needs no registry name and does not create the group.
+
+   </details>
+
+   <details>
+   <summary><b>5. Steps: check out and log in</b></summary>
+
+   ```yaml
+   - uses: actions/checkout@v4
+
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+
+   Same as the ACR workflow: download the repo so `infra/data-ai.bicep` is available, then sign in to Azure with OIDC and the three repo secrets from Step 3.
+
+   </details>
+
+   <details>
+   <summary><b>6. Step: deploy with Bicep</b></summary>
+
+   ```yaml
+   - name: Deploy with Bicep
+     run: |
+       az deployment group create \
+         -g $RG \
+         -f infra/data-ai.bicep \
+         -p createSearch=false
+   ```
+
+   - **`-f infra/data-ai.bicep`** defines the storage account (blob container `documents`, queue `ingest-jobs`) and the Azure OpenAI account with its `chat` and `embeddings` deployments. Since Step 13 it also turns off storage shared keys and OpenAI API keys.
+   - **`-p createSearch=false`** tells Bicep not to create an AI Search service. The subscription allows only one Free search service, and I reuse the existing `rag-vector-store` that another project already holds.
+   - Re-running updates the resources in place, which is how Step 13 applied the hardening.
+
+   </details>
+
+
 ---
 
 6. **Verify the resources exist:**
@@ -687,6 +1189,97 @@ This is slightly wider than the table in `docs/architecture.md`, because the cod
    | Command | What it does |
    |---|---|
    | `az identity list -g rg-portfolio` | Lists managed identities in the resource group, with their client IDs |
+
+   **The `Deploy identities and roles (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-identity.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
+
+   <details>
+   <summary><b>1. Name</b></summary>
+
+   ```yaml
+   name: Deploy identities and roles (infra)
+   ```
+
+   The label shown in the **Actions** tab.
+
+   </details>
+
+   <details>
+   <summary><b>2. Trigger (<code>on</code>)</b></summary>
+
+   ```yaml
+   on:
+     workflow_dispatch:
+   ```
+
+   Only the **Run workflow** button. Identities and permissions should change only when I decide to.
+
+   </details>
+
+   <details>
+   <summary><b>3. Permissions, job and runner</b></summary>
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+
+   jobs:
+     deploy-identity:
+       runs-on: ubuntu-latest
+       steps:
+   ```
+
+   Same as the ACR workflow: `id-token: write` lets the job get an OIDC token for the Azure login, `contents: read` lets it download the repo, and the job runs on a temporary Ubuntu machine with the Azure CLI installed.
+
+   </details>
+
+   <details>
+   <summary><b>4. Environment variable (<code>env</code>)</b></summary>
+
+   ```yaml
+   env:
+     RG: rg-portfolio
+   ```
+
+   Only the resource group. The Bicep file works out the storage and OpenAI account names itself, using the same `uniqueString` rule as `data-ai.bicep`, so no names need to be passed in.
+
+   </details>
+
+   <details>
+   <summary><b>5. Steps: check out and log in</b></summary>
+
+   ```yaml
+   - uses: actions/checkout@v4
+
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+
+   Same as the ACR workflow: download the repo so `infra/identity.bicep` is available, then sign in to Azure with OIDC and the three repo secrets from Step 3.
+
+   </details>
+
+   <details>
+   <summary><b>6. Step: deploy the identities with Bicep</b></summary>
+
+   ```yaml
+   - name: Deploy identities with Bicep
+     run: |
+       az deployment group create \
+         -g $RG \
+         -f infra/identity.bicep
+   ```
+
+   - **`-f infra/identity.bicep`** creates the managed identities `id-api` and `id-worker`, a federated credential for each (trusting the Kubernetes ServiceAccounts `sa-api` and `sa-worker`), and their role assignments on Storage and OpenAI.
+   - There are no `-p` parameters because every value has a default.
+   - It needs `User Access Administrator` on the resource group (Step 6, item 3), because it creates role assignments.
+   - The AI Search roles are not here. The search service is in another resource group, so I assign those by hand in item 3 of this step.
+
+   </details>
+
 
 ---
 
@@ -890,6 +1483,180 @@ The namespace and ServiceAccounts are not applied by the pipeline. They are one-
 ---
 
 3. **Watch both workflows:** repo > **Actions** tab. First **Build and push images to ACR**, then **Deploy app to AKS** starts on its own. Both should turn green.
+
+   **The `Deploy app to AKS` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-app.yml`.
+
+   <details>
+   <summary><b>1. Name</b></summary>
+
+   ```yaml
+   name: Deploy app to AKS
+   ```
+
+   The label shown in the **Actions** tab. The comments in the file say what it does: it runs after the image build succeeds on `main`, and because the images are tagged with the commit SHA, every deploy is traceable and easy to roll back.
+
+   </details>
+
+   <details>
+   <summary><b>2. Triggers (<code>on</code>)</b></summary>
+
+   ```yaml
+   on:
+     workflow_run:
+       workflows: ['Build and push images to ACR']
+       types: [completed]
+       branches: [main]
+     workflow_dispatch:
+       inputs:
+         image_tag:
+           description: 'Image tag already in ACR (default: latest commit SHA)'
+           required: false
+   ```
+
+   Two ways to start it:
+   - **`workflow_run`** starts it when the workflow named `Build and push images to ACR` finishes on `main`. It fires whether the build passed or failed, which is why the job has an `if` check (section 6). The name must match the build workflow's `name:` exactly.
+   - **`workflow_dispatch`** adds the **Run workflow** button. It has an optional `image_tag` box, so I can deploy or roll back to any tag that is already in ACR.
+
+   </details>
+
+   <details>
+   <summary><b>3. Permissions</b></summary>
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+   ```
+
+   What the workflow's built-in token may do:
+   - **`id-token: write`** lets the job ask GitHub for an OIDC identity token, which Azure checks against the federated credential from Step 2.
+   - **`contents: read`** lets the job download the repo's code.
+
+   Everything else is denied.
+
+   </details>
+
+   <details>
+   <summary><b>4. Concurrency</b></summary>
+
+   ```yaml
+   concurrency:
+     group: deploy-app
+     cancel-in-progress: false
+   ```
+
+   Only one deploy runs at a time. If a second one is triggered while the first is running, it waits its turn. `cancel-in-progress: false` means a running deploy is never cancelled halfway, because stopping a rollout midway could leave the app in a mixed state.
+
+   </details>
+
+   <details>
+   <summary><b>5. Environment variables (<code>env</code>)</b></summary>
+
+   ```yaml
+   env:
+     RG: rg-portfolio
+     CLUSTER: aks-azure-cloud-ai
+     NAMESPACE: rag-app
+     ACR_NAME: ${{ vars.ACR_NAME }}
+     TAG: ${{ github.event.workflow_run.head_sha || inputs.image_tag || github.sha }}
+   ```
+
+   Values the steps reuse:
+   - **`RG`, `CLUSTER`, `NAMESPACE`** say where to deploy: the resource group, the AKS cluster and the Kubernetes namespace.
+   - **`ACR_NAME`** comes from the repo variable from Step 4.
+   - **`TAG`** is the image version to deploy. The `||` operators pick the first value that exists:
+     1. `workflow_run.head_sha`: when started by a finished build, the commit that was just built.
+     2. `inputs.image_tag`: when I start it by hand and type a tag.
+     3. `github.sha`: when I start it by hand and leave the box empty, the latest commit. That image may not exist yet, so a manual run should normally give a tag.
+
+   </details>
+
+   <details>
+   <summary><b>6. Job, runner and the <code>if</code> check</b></summary>
+
+   ```yaml
+   jobs:
+     deploy:
+       # For workflow_run, only deploy when the build succeeded
+       if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+       runs-on: ubuntu-latest
+       steps:
+   ```
+
+   - **`if`** lets the job run when I started it by hand, or when the build workflow finished with `success`. A failed build is skipped, so a broken build never gets deployed.
+   - **`runs-on: ubuntu-latest`** is the temporary Linux machine GitHub starts for the job. It is discarded afterwards.
+
+   </details>
+
+   <details>
+   <summary><b>7. Step: check out the code</b></summary>
+
+   ```yaml
+   - uses: actions/checkout@v4
+     with:
+       ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+   ```
+
+   Downloads the repo onto the runner so the `k8s/` manifests are there. The `ref` makes it check out the exact commit that was built, not whatever `main` points to now. That keeps the manifests and the image tag from the same commit.
+
+   </details>
+
+   <details>
+   <summary><b>8. Step: log in to Azure</b></summary>
+
+   ```yaml
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+
+   Signs the runner in to Azure with **OIDC**, using the three repo secrets from Step 3. There is no password: GitHub presents a short-lived token, and Azure accepts it because of the federated credential from Step 2.
+
+   </details>
+
+   <details>
+   <summary><b>9. Step: connect to the cluster</b></summary>
+
+   ```yaml
+   - uses: azure/aks-set-context@v4
+     with:
+       resource-group: ${{ env.RG }}
+       cluster-name: ${{ env.CLUSTER }}
+   ```
+
+   Fetches the AKS cluster's connection details and points `kubectl` at it, so the next step can talk to the cluster. The cluster must be running: if it is stopped, this step fails.
+
+   </details>
+
+   <details>
+   <summary><b>10. Step: deploy the manifests with the new images</b></summary>
+
+   ```yaml
+   # Namespace and ServiceAccounts are one-time setup (Steps 7 and 9), so they are not applied here
+   - uses: azure/k8s-deploy@v5
+     with:
+       namespace: ${{ env.NAMESPACE }}
+       manifests: |
+         k8s/backend-api-service.yaml
+         k8s/backend-api.yaml
+         k8s/ingestion-worker.yaml
+         k8s/frontend.yaml
+       images: |
+         ${{ env.ACR_NAME }}.azurecr.io/frontend:${{ env.TAG }}
+         ${{ env.ACR_NAME }}.azurecr.io/backend-api:${{ env.TAG }}
+         ${{ env.ACR_NAME }}.azurecr.io/ingestion-worker:${{ env.TAG }}
+   ```
+
+   The step that actually deploys:
+   - **`manifests`** lists the YAML files to apply. The namespace and ServiceAccounts are left out on purpose: they are one-time setup, and the ServiceAccounts carry client ID annotations I added by hand.
+   - **`images`** lists the exact SHA-tagged images. The action replaces the image names in the manifests (which say `:latest`) with these tags before applying them.
+   - It then applies the manifests and **waits for the rollout to finish**, so a pod that never becomes ready makes the workflow fail instead of looking green.
+   - The `maxSurge: 0` rollout strategy in the Deployments (see Step 12 troubleshooting) means the old pod is stopped before the new one starts, because my one node has no spare room.
+
+   </details>
+
 
 ---
 
@@ -1208,6 +1975,96 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
    | Command | What it does |
    |---|---|
    | `az resource list -g rg-portfolio --query ...` | Lists resources in the group whose names contain `azure-cloud-ai` |
+
+   **The `Deploy monitoring (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-monitoring.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
+
+   <details>
+   <summary><b>1. Name</b></summary>
+
+   ```yaml
+   name: Deploy monitoring (infra)
+   ```
+
+   The label shown in the **Actions** tab.
+
+   </details>
+
+   <details>
+   <summary><b>2. Trigger (<code>on</code>)</b></summary>
+
+   ```yaml
+   on:
+     workflow_dispatch:
+   ```
+
+   Only the **Run workflow** button. I run it once to create the monitoring resources.
+
+   </details>
+
+   <details>
+   <summary><b>3. Permissions, job and runner</b></summary>
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+
+   jobs:
+     deploy-monitoring:
+       runs-on: ubuntu-latest
+       steps:
+   ```
+
+   Same as the ACR workflow: `id-token: write` lets the job get an OIDC token for the Azure login, `contents: read` lets it download the repo, and the job runs on a temporary Ubuntu machine with the Azure CLI installed.
+
+   </details>
+
+   <details>
+   <summary><b>4. Environment variable (<code>env</code>)</b></summary>
+
+   ```yaml
+   env:
+     RG: rg-portfolio
+   ```
+
+   Only the resource group.
+
+   </details>
+
+   <details>
+   <summary><b>5. Steps: check out and log in</b></summary>
+
+   ```yaml
+   - uses: actions/checkout@v4
+
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   ```
+
+   Same as the ACR workflow: download the repo so `infra/monitoring.bicep` is available, then sign in to Azure with OIDC and the three repo secrets from Step 3.
+
+   </details>
+
+   <details>
+   <summary><b>6. Step: deploy monitoring with Bicep</b></summary>
+
+   ```yaml
+   - name: Deploy monitoring with Bicep
+     run: |
+       az deployment group create \
+         -g $RG \
+         -f infra/monitoring.bicep
+   ```
+
+   - **`-f infra/monitoring.bicep`** creates the Log Analytics workspace `log-azure-cloud-ai` (30-day retention and a 0.2 GB daily cap to limit cost) and the Application Insights resource `appi-azure-cloud-ai`, which writes into that workspace.
+   - There are no `-p` parameters because every value has a default.
+   - This workflow does not turn on Container Insights or give the apps the connection string. Those are separate commands in items 3 and 4 of this step.
+
+   </details>
+
 
 ---
 
