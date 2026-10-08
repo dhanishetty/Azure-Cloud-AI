@@ -13,6 +13,19 @@ The cluster is stopped when I'm not using it to save money, so the site may be o
 <!-- Add screenshots here: the live site, the green pipelines, Application Insights. Example:
 ![App](docs/images/app.png) -->
 
+## Table of Contents
+
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [CI/CD](#cicd)
+- [What this project demonstrates](#what-this-project-demonstrates)
+- [Azure services](#azure-services)
+- [Repository layout](#repository-layout)
+- [Workflows](#workflows)
+- [How I built it](#how-i-built-it)
+- [Cost](#cost)
+- [Limits and next steps](#limits-and-next-steps)
+
 ## What it does
 
 1. Upload a PDF. The API stores it in Blob Storage and queues a job.
