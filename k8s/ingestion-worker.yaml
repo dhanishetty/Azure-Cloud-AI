@@ -5,6 +5,12 @@ metadata:
   namespace: rag-app
 spec:
   replicas: 1
+  # One small node: replace the old pod instead of starting a second one next to it
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: ingestion-worker

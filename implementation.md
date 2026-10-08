@@ -1298,6 +1298,7 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
 - **Query returns no rows:** wait a few minutes, make sure the pods restarted after item 4, and check `kubectl logs deployment/backend-api -n rag-app` for errors. Confirm the key exists with `kubectl get configmap app-config -n rag-app -o yaml`.
 - **Pods in `CrashLoopBackOff` after the code change:** the logs usually show an import error. Confirm the image build finished and `azure-monitor-opentelemetry` is in `requirements.txt`.
 - **Pods `Pending`, `Insufficient cpu/memory`:** see the capacity note in item 3.
+- **Rollout stuck: new pods `Pending` for hours, old pods still running (this happened to me):** a normal rolling update starts the new pod before stopping the old one, which needs room for both. My one node was at 90% memory requests, so the new pod never scheduled (`kubectl describe pod ...` showed `1 Insufficient memory`; `kubectl describe node` showed the allocation). I fixed it by adding `strategy: RollingUpdate` with `maxSurge: 0` and `maxUnavailable: 1` to `backend-api.yaml` and `ingestion-worker.yaml`, which replaces the old pod instead of surging. Cost: a short backend outage per deploy. Apply with `kubectl apply -f k8s/backend-api.yaml -f k8s/ingestion-worker.yaml`. If the node is still too full, disable Container Insights or add a node.
 - **`MissingSubscriptionRegistration`:** item 1 isn't finished.
 - **Logs stop for the day:** the 0.2 GB daily cap was reached. That is the cap working. Raise `dailyQuotaGb` in `monitoring.bicep` if needed.
 
