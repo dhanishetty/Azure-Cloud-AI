@@ -13,11 +13,11 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 - [Step 4: Repo Variable](#step-4-repo-variable)
 - [Step 5: Run Order](#step-5-run-order) (ACR and image build workflows explained)
 - [Step 6: Deploy AKS](#step-6-deploy-aks) (AKS workflow explained)
-- [Step 7: Deploy the Frontend to AKS](#step-7-deploy-the-frontend-to-aks)
+- [Step 7: Deploy the Frontend to AKS](#step-7-deploy-the-frontend-to-aks) (namespace, frontend and backend Service manifests explained)
 - [Step 8: Deploy Storage, AI Search and OpenAI](#step-8-deploy-storage-ai-search-and-openai) (data workflow explained)
-- [Step 9: Deploy the Backend and Worker with Managed Identity](#step-9-deploy-the-backend-and-worker-with-managed-identity) (identity workflow explained)
+- [Step 9: Deploy the Backend and Worker with Managed Identity](#step-9-deploy-the-backend-and-worker-with-managed-identity) (identity workflow, ServiceAccounts, backend and worker manifests explained)
 - [Step 10: Deploy to AKS Automatically (CI/CD)](#step-10-deploy-to-aks-automatically-cicd) (deploy-app workflow explained)
-- [Step 11: HTTPS and a Stable URL](#step-11-https-and-a-stable-url)
+- [Step 11: HTTPS and a Stable URL](#step-11-https-and-a-stable-url) (Traefik values, issuers and Ingress explained)
 - [Step 12: Monitoring](#step-12-monitoring) (monitoring workflow explained)
 - [Step 13: Hardening](#step-13-hardening)
 - [Step 14: Budget Alert](#step-14-budget-alert)
@@ -317,6 +317,53 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    **The `Deploy ACR (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-acr.yml`.
 
    <details>
+   <summary><b>Show the whole file</b></summary>
+
+   ```yaml
+   name: Deploy ACR (infra)
+   
+   on:
+     push:
+       branches: [main]
+       paths: ['infra/**', '.github/workflows/deploy-acr.yml']
+     workflow_dispatch:
+   
+   permissions:
+     id-token: write
+     contents: read
+   
+   env:
+     RG: rg-portfolio
+     LOCATION: eastus
+     ACR_NAME: ${{ vars.ACR_NAME }}
+   
+   jobs:
+     deploy-acr:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+   
+         - uses: azure/login@v2
+           with:
+             client-id: ${{ secrets.AZURE_CLIENT_ID }}
+             tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+             subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   
+         - name: Create resource group
+           run: az group create -n $RG -l $LOCATION
+   
+         - name: Deploy ACR with Bicep
+           run: |
+             az deployment group create \
+               -g $RG \
+               -f infra/acr.bicep \
+               -p acrName=$ACR_NAME
+   ```
+
+   </details>
+
+
+   <details>
    <summary><b>1. Name</b></summary>
 
    ```yaml
@@ -477,6 +524,57 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    All three repositories should be listed, each tagged with the commit SHA and `latest`.
 
    **The `Build and push images to ACR` workflow, section by section** (click a section to expand it). The file is `.github/workflows/build-push-images.yml`.
+
+   <details>
+   <summary><b>Show the whole file</b></summary>
+
+   ```yaml
+   name: Build and push images to ACR
+   
+   on:
+     push:
+       branches: [main]
+       paths: ['Code/**', 'k8s/**', '.github/workflows/build-push-images.yml']
+     workflow_dispatch:
+   
+   permissions:
+     id-token: write
+     contents: read
+   
+   env:
+     ACR_NAME: ${{ vars.ACR_NAME }}
+   
+   jobs:
+     build-push:
+       runs-on: ubuntu-latest
+       strategy:
+         matrix:
+           include:
+             - image: frontend
+               context: Code/Frontend
+             - image: backend-api
+               context: Code/Backend/RAG/backend-api
+             - image: ingestion-worker
+               context: Code/Backend/RAG/ingestion-worker
+       steps:
+         - uses: actions/checkout@v4
+   
+         - uses: azure/login@v2
+           with:
+             client-id: ${{ secrets.AZURE_CLIENT_ID }}
+             tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+             subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   
+         - name: Build and push (tagged with commit SHA and latest)
+           run: |
+             az acr build -r $ACR_NAME \
+               -t ${{ matrix.image }}:${{ github.sha }} \
+               -t ${{ matrix.image }}:latest \
+               ${{ matrix.context }}
+   ```
+
+   </details>
+
 
    <details>
    <summary><b>1. Name</b></summary>
@@ -713,6 +811,47 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    **The `Deploy AKS (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-aks.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
 
    <details>
+   <summary><b>Show the whole file</b></summary>
+
+   ```yaml
+   name: Deploy AKS (infra)
+   
+   # Manual only: the cluster costs money while running
+   on:
+     workflow_dispatch:
+   
+   permissions:
+     id-token: write
+     contents: read
+   
+   env:
+     RG: rg-portfolio
+     ACR_NAME: ${{ vars.ACR_NAME }}
+   
+   jobs:
+     deploy-aks:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+   
+         - uses: azure/login@v2
+           with:
+             client-id: ${{ secrets.AZURE_CLIENT_ID }}
+             tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+             subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   
+         - name: Deploy AKS with Bicep
+           run: |
+             az deployment group create \
+               -g $RG \
+               -f infra/aks.bicep \
+               -p acrName=$ACR_NAME
+   ```
+
+   </details>
+
+
+   <details>
    <summary><b>1. Name</b></summary>
 
    ```yaml
@@ -870,6 +1009,322 @@ az aks start -g rg-portfolio -n aks-azure-cloud-ai
 | `frontend.yaml` | Frontend `Deployment` (1 pod, small resource limits, health probes) and a `LoadBalancer` `Service` that gives it a public IP |
 | `backend-api-service.yaml` | Placeholder `Service` with no pods yet. The frontend's nginx looks up `backend-api` at startup and crashes if it can't resolve it. Until the backend exists, `/api` returns 502. |
 
+**The manifests, file by file** (click a section to expand it). Each file has a **Show the whole file** button first, then one section per part.
+
+**`k8s/namespace.yaml`, section by section**
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rag-app
+```
+
+</details>
+
+<details>
+<summary><b>1. Kind and version</b></summary>
+
+```yaml
+apiVersion: v1
+kind: Namespace
+```
+
+- **`apiVersion`** says which version of the Kubernetes API describes this object.
+- **`kind: Namespace`** is a named folder inside the cluster. It groups related resources so they stay separate from system pods and other projects.
+
+</details>
+
+<details>
+<summary><b>2. Name</b></summary>
+
+```yaml
+metadata:
+  name: rag-app
+```
+
+Every other file puts its resources into this namespace with `namespace: rag-app`. It has to exist first, which is why Step 7 applies this file before the others.
+
+</details>
+
+**`k8s/backend-api-service.yaml`, section by section**
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+# Placeholder Service so the frontend's nginx can resolve "backend-api".
+# It has no pods behind it yet; /api returns 502 until the backend Deployment exists.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api
+  namespace: rag-app
+spec:
+  type: ClusterIP
+  selector:
+    app: backend-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+```
+
+</details>
+
+<details>
+<summary><b>1. Comment</b></summary>
+
+```yaml
+# Placeholder Service so the frontend's nginx can resolve "backend-api".
+# It has no pods behind it yet; /api returns 502 until the backend Deployment exists.
+```
+
+The frontend's nginx looks up the name `backend-api` when it starts, and crashes if it can't find it. This Service makes the name exist before the backend does. The backend pods arrived in Step 9, so it now routes to real pods.
+
+</details>
+
+<details>
+<summary><b>2. Kind and metadata</b></summary>
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api
+  namespace: rag-app
+```
+
+A **Service** is a stable internal address in front of a set of pods. Its `name` becomes a DNS name inside the cluster, so the frontend can call `http://backend-api:8000`. It lives in the `rag-app` namespace.
+
+</details>
+
+<details>
+<summary><b>3. Type and selector</b></summary>
+
+```yaml
+spec:
+  type: ClusterIP
+  selector:
+    app: backend-api
+```
+
+- **`type: ClusterIP`** makes the Service reachable only from inside the cluster, not from the internet.
+- **`selector`** picks the pods to send traffic to: any pod with the label `app: backend-api`.
+
+</details>
+
+<details>
+<summary><b>4. Ports</b></summary>
+
+```yaml
+  ports:
+    - port: 8000
+      targetPort: 8000
+```
+
+- **`port`** is the port the Service listens on.
+- **`targetPort`** is the port on the pod it forwards to (where FastAPI listens).
+
+</details>
+
+**`k8s/frontend.yaml`, section by section** (it holds two objects: a Deployment and a Service)
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: rag-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: azurecloudai12345.azurecr.io/frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND_URL
+              value: http://backend-api:8000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: rag-app
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+</details>
+
+<details>
+<summary><b>1. Deployment header</b></summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: rag-app
+```
+
+A **Deployment** keeps the desired number of pods running and handles rolling updates. This one is named `frontend`, in the `rag-app` namespace.
+
+</details>
+
+<details>
+<summary><b>2. Replicas and selector</b></summary>
+
+```yaml
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+```
+
+- **`replicas: 1`** runs one pod. That is all my single node can afford.
+- **`selector`** tells the Deployment which pods are its own: those labelled `app: frontend`. It must match the labels in the pod template below.
+
+</details>
+
+<details>
+<summary><b>3. Pod template labels</b></summary>
+
+```yaml
+  template:
+    metadata:
+      labels:
+        app: frontend
+```
+
+The pod blueprint. The label `app: frontend` is how both the Deployment and the `frontend` Service find these pods.
+
+</details>
+
+<details>
+<summary><b>4. Container</b></summary>
+
+```yaml
+    spec:
+      containers:
+        - name: frontend
+          image: azurecloudai12345.azurecr.io/frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND_URL
+              value: http://backend-api:8000
+```
+
+- **`image`** is the frontend image in my registry. The pipeline replaces `:latest` with the commit SHA tag when it deploys.
+- **`imagePullPolicy: Always`** makes the node check the registry on every start instead of reusing a cached image.
+- **`containerPort: 80`** is where nginx listens.
+- **`env`** sets `BACKEND_URL`, which the nginx config uses to forward `/api` requests to the backend Service.
+
+</details>
+
+<details>
+<summary><b>5. Resources</b></summary>
+
+```yaml
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+```
+
+- **`requests`** is what the scheduler reserves for the pod on a node (50 millicores of CPU, 64 MiB of memory). With one small node, keeping requests low is what lets everything fit.
+- **`limits`** is the maximum it may use. Going over the memory limit gets the container restarted.
+
+</details>
+
+<details>
+<summary><b>6. Health probes</b></summary>
+
+```yaml
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+```
+
+- **`readinessProbe`** decides when the pod may receive traffic: once `/` answers.
+- **`livenessProbe`** restarts the container if `/` stops answering. `initialDelaySeconds: 10` gives it time to start first.
+
+</details>
+
+<details>
+<summary><b>7. Separator and Service</b></summary>
+
+```yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: rag-app
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+- **`---`** separates two Kubernetes objects in one file.
+- The **Service** gives the pods a stable internal address on port 80.
+- **`type: ClusterIP`** keeps it internal. In Step 7 this was `LoadBalancer` (a public IP). In Step 11 I changed it, because Traefik now receives the traffic and forwards it here.
+
+</details>
+
+
 The frontend image is `azurecloudai12345.azurecr.io/frontend:latest`. Change it if my ACR name differs.
 
 1. **Check I'm pointed at the right cluster:**
@@ -1013,6 +1468,45 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
 5. **Run `Deploy Storage, Search and OpenAI (infra)`:** GitHub repo > **Actions** tab > select it > **Run workflow** > `main`. Takes about 3-5 minutes.
 
    **The `Deploy Storage, Search and OpenAI (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-data-ai.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
+
+   <details>
+   <summary><b>Show the whole file</b></summary>
+
+   ```yaml
+   name: Deploy Storage, Search and OpenAI (infra)
+   
+   on:
+     workflow_dispatch:
+   
+   permissions:
+     id-token: write
+     contents: read
+   
+   env:
+     RG: rg-portfolio
+   
+   jobs:
+     deploy-data-ai:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+   
+         - uses: azure/login@v2
+           with:
+             client-id: ${{ secrets.AZURE_CLIENT_ID }}
+             tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+             subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   
+         - name: Deploy with Bicep
+           run: |
+             az deployment group create \
+               -g $RG \
+               -f infra/data-ai.bicep \
+               -p createSearch=false
+   ```
+
+   </details>
+
 
    <details>
    <summary><b>1. Name</b></summary>
@@ -1164,6 +1658,425 @@ This is slightly wider than the table in `docs/architecture.md`, because the cod
 | `backend-api/main.py`, `ingestion-worker/worker.py` | Changed: `DefaultAzureCredential` instead of keys. Env var `STORAGE_ACCOUNT_NAME` replaces the connection string. |
 | both `requirements.txt` | Added `azure-identity` |
 
+**The Step 9 manifests, file by file** (click a section to expand it). Each file has a **Show the whole file** button first, then one section per part.
+
+**`k8s/serviceaccounts.yaml`, section by section**
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+# The client-id annotation is added with `kubectl annotate` (see implementation.md, Step 9),
+# so no Azure IDs are stored in git.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-api
+  namespace: rag-app
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-worker
+  namespace: rag-app
+```
+
+</details>
+
+<details>
+<summary><b>1. Comment</b></summary>
+
+```yaml
+# The client-id annotation is added with `kubectl annotate` (see implementation.md, Step 9),
+# so no Azure IDs are stored in git.
+```
+
+A ServiceAccount links to a managed identity through an annotation that holds the identity's client ID. I add that annotation with a command instead of writing it in the file, so no Azure IDs end up in git.
+
+</details>
+
+<details>
+<summary><b>2. The API's ServiceAccount</b></summary>
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-api
+  namespace: rag-app
+```
+
+A **ServiceAccount** is the Kubernetes identity a pod runs as. `sa-api` is used by the backend. Its name must match the federated credential on `id-api`, whose subject is `system:serviceaccount:rag-app:sa-api`.
+
+</details>
+
+<details>
+<summary><b>3. Separator and the worker's ServiceAccount</b></summary>
+
+```yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-worker
+  namespace: rag-app
+```
+
+`---` separates the two objects. `sa-worker` is the same idea for the worker, tied to `id-worker`. Two separate accounts keep their permissions separate.
+
+</details>
+
+**`k8s/backend-api.yaml`, section by section**
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+  namespace: rag-app
+spec:
+  replicas: 1
+  # One small node: replace the old pod instead of starting a second one next to it
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: backend-api
+  template:
+    metadata:
+      labels:
+        app: backend-api
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: sa-api
+      containers:
+        - name: backend-api
+          image: azurecloudai12345.azurecr.io/backend-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: app-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+```
+
+</details>
+
+<details>
+<summary><b>1. Deployment header</b></summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+  namespace: rag-app
+```
+
+A **Deployment** keeps the desired number of pods running and handles rolling updates. This one is `backend-api`, in the `rag-app` namespace.
+
+</details>
+
+<details>
+<summary><b>2. Replicas and rollout strategy</b></summary>
+
+```yaml
+spec:
+  replicas: 1
+  # One small node: replace the old pod instead of starting a second one next to it
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+```
+
+- **`replicas: 1`** runs one pod.
+- **`maxSurge: 0`** means no extra pod is started during an update.
+- **`maxUnavailable: 1`** allows the one existing pod to stop first.
+
+A normal update starts the new pod before stopping the old one, which needs room for both. My one node was full, so the new pod stayed `Pending` forever. With this setting the old pod stops, then the new one takes its place. The cost is a short outage on each deploy.
+
+</details>
+
+<details>
+<summary><b>3. Selector</b></summary>
+
+```yaml
+  selector:
+    matchLabels:
+      app: backend-api
+```
+
+Tells the Deployment which pods are its own: those labelled `app: backend-api`. It must match the labels in the pod template.
+
+</details>
+
+<details>
+<summary><b>4. Pod labels, including the workload identity label</b></summary>
+
+```yaml
+  template:
+    metadata:
+      labels:
+        app: backend-api
+        azure.workload.identity/use: "true"
+```
+
+- **`app: backend-api`** is how the Deployment and the `backend-api` Service find the pod.
+- **`azure.workload.identity/use: "true"`** tells AKS Workload Identity to inject an Azure token into this pod. Without the label, the pod can't sign in as its managed identity.
+
+</details>
+
+<details>
+<summary><b>5. ServiceAccount</b></summary>
+
+```yaml
+    spec:
+      serviceAccountName: sa-api
+```
+
+Runs the pod as `sa-api`, which is linked to the managed identity `id-api`. That link is what gives the code access to Storage, OpenAI and Search without keys.
+
+</details>
+
+<details>
+<summary><b>6. Container</b></summary>
+
+```yaml
+      containers:
+        - name: backend-api
+          image: azurecloudai12345.azurecr.io/backend-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+```
+
+- **`image`** is the backend image in my registry. The pipeline replaces `:latest` with the commit SHA tag.
+- **`imagePullPolicy: Always`** checks the registry on every start.
+- **`containerPort: 8000`** is where FastAPI (uvicorn) listens.
+
+</details>
+
+<details>
+<summary><b>7. Settings from the ConfigMap</b></summary>
+
+```yaml
+          envFrom:
+            - configMapRef:
+                name: app-config
+```
+
+Turns every key in the `app-config` ConfigMap (endpoints, deployment names, the Application Insights connection string) into an environment variable. The ConfigMap holds no passwords or keys.
+
+</details>
+
+<details>
+<summary><b>8. Resources</b></summary>
+
+```yaml
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+```
+
+- **`requests`** is what the scheduler reserves on the node.
+- **`limits`** is the maximum the container may use. Going over the memory limit gets it restarted.
+
+</details>
+
+<details>
+<summary><b>9. Health probes</b></summary>
+
+```yaml
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+```
+
+- **`readinessProbe`** sends traffic to the pod only once `/health` answers.
+- **`livenessProbe`** restarts the container if `/health` stops answering. `initialDelaySeconds: 15` gives it time to start first.
+
+</details>
+
+**`k8s/ingestion-worker.yaml`, section by section**
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-worker
+  namespace: rag-app
+spec:
+  replicas: 1
+  # One small node: replace the old pod instead of starting a second one next to it
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: ingestion-worker
+  template:
+    metadata:
+      labels:
+        app: ingestion-worker
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: sa-worker
+      containers:
+        - name: ingestion-worker
+          image: azurecloudai12345.azurecr.io/ingestion-worker:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: app-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+```
+
+</details>
+
+<details>
+<summary><b>1. Deployment header</b></summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-worker
+  namespace: rag-app
+```
+
+A Deployment named `ingestion-worker`, in the `rag-app` namespace. It runs the process that reads upload jobs from the queue and indexes the PDFs.
+
+</details>
+
+<details>
+<summary><b>2. Replicas and rollout strategy</b></summary>
+
+```yaml
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+```
+
+One pod, and updates replace the old pod instead of starting a second one next to it, because the single node has no spare room. Same reasoning as `backend-api.yaml`.
+
+</details>
+
+<details>
+<summary><b>3. Selector and pod labels</b></summary>
+
+```yaml
+  selector:
+    matchLabels:
+      app: ingestion-worker
+  template:
+    metadata:
+      labels:
+        app: ingestion-worker
+        azure.workload.identity/use: "true"
+```
+
+- **`selector`** tells the Deployment which pods are its own.
+- **`azure.workload.identity/use: "true"`** makes AKS inject an Azure token so the pod can sign in as its managed identity.
+
+</details>
+
+<details>
+<summary><b>4. ServiceAccount</b></summary>
+
+```yaml
+    spec:
+      serviceAccountName: sa-worker
+```
+
+Runs the pod as `sa-worker`, linked to the managed identity `id-worker`. That identity can process queue messages, write blob status, create the search index and call OpenAI.
+
+</details>
+
+<details>
+<summary><b>5. Container</b></summary>
+
+```yaml
+      containers:
+        - name: ingestion-worker
+          image: azurecloudai12345.azurecr.io/ingestion-worker:latest
+          imagePullPolicy: Always
+```
+
+The worker image from my registry (the pipeline replaces `:latest` with the commit SHA). There is no `ports` section and no probes, because the worker doesn't serve HTTP: it just polls the queue.
+
+</details>
+
+<details>
+<summary><b>6. Settings and resources</b></summary>
+
+```yaml
+          envFrom:
+            - configMapRef:
+                name: app-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+```
+
+- **`envFrom`** turns the keys in the `app-config` ConfigMap into environment variables. No secrets are in it.
+- **`resources`** reserves 100m CPU and 256 MiB on the node, and caps the container at 500m and 512 MiB.
+
+</details>
+
+
 1. **Commit and push** (this also rebuilds the images with the new code):
    ```powershell
    git add .
@@ -1191,6 +2104,44 @@ This is slightly wider than the table in `docs/architecture.md`, because the cod
    | `az identity list -g rg-portfolio` | Lists managed identities in the resource group, with their client IDs |
 
    **The `Deploy identities and roles (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-identity.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
+
+   <details>
+   <summary><b>Show the whole file</b></summary>
+
+   ```yaml
+   name: Deploy identities and roles (infra)
+   
+   on:
+     workflow_dispatch:
+   
+   permissions:
+     id-token: write
+     contents: read
+   
+   env:
+     RG: rg-portfolio
+   
+   jobs:
+     deploy-identity:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+   
+         - uses: azure/login@v2
+           with:
+             client-id: ${{ secrets.AZURE_CLIENT_ID }}
+             tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+             subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   
+         - name: Deploy identities with Bicep
+           run: |
+             az deployment group create \
+               -g $RG \
+               -f infra/identity.bicep
+   ```
+
+   </details>
+
 
    <details>
    <summary><b>1. Name</b></summary>
@@ -1487,6 +2438,79 @@ The namespace and ServiceAccounts are not applied by the pipeline. They are one-
    **The `Deploy app to AKS` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-app.yml`.
 
    <details>
+   <summary><b>Show the whole file</b></summary>
+
+   ```yaml
+   name: Deploy app to AKS
+   
+   # Runs after "Build and push images to ACR" succeeds on main.
+   # Images are tagged with the commit SHA, so each deploy is traceable and easy to roll back.
+   on:
+     workflow_run:
+       workflows: ['Build and push images to ACR']
+       types: [completed]
+       branches: [main]
+     workflow_dispatch:
+       inputs:
+         image_tag:
+           description: 'Image tag already in ACR (default: latest commit SHA)'
+           required: false
+   
+   permissions:
+     id-token: write
+     contents: read
+   
+   concurrency:
+     group: deploy-app
+     cancel-in-progress: false
+   
+   env:
+     RG: rg-portfolio
+     CLUSTER: aks-azure-cloud-ai
+     NAMESPACE: rag-app
+     ACR_NAME: ${{ vars.ACR_NAME }}
+     TAG: ${{ github.event.workflow_run.head_sha || inputs.image_tag || github.sha }}
+   
+   jobs:
+     deploy:
+       # For workflow_run, only deploy when the build succeeded
+       if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+           with:
+             ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+   
+         - uses: azure/login@v2
+           with:
+             client-id: ${{ secrets.AZURE_CLIENT_ID }}
+             tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+             subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   
+         - uses: azure/aks-set-context@v4
+           with:
+             resource-group: ${{ env.RG }}
+             cluster-name: ${{ env.CLUSTER }}
+   
+         # Namespace and ServiceAccounts are one-time setup (Steps 7 and 9), so they are not applied here
+         - uses: azure/k8s-deploy@v5
+           with:
+             namespace: ${{ env.NAMESPACE }}
+             manifests: |
+               k8s/backend-api-service.yaml
+               k8s/backend-api.yaml
+               k8s/ingestion-worker.yaml
+               k8s/frontend.yaml
+             images: |
+               ${{ env.ACR_NAME }}.azurecr.io/frontend:${{ env.TAG }}
+               ${{ env.ACR_NAME }}.azurecr.io/backend-api:${{ env.TAG }}
+               ${{ env.ACR_NAME }}.azurecr.io/ingestion-worker:${{ env.TAG }}
+   ```
+
+   </details>
+
+
+   <details>
    <summary><b>1. Name</b></summary>
 
    ```yaml
@@ -1741,6 +2765,328 @@ The namespace and ServiceAccounts are not applied by the pipeline. They are one-
 | `platform/cluster-issuers.yaml` | Let's Encrypt staging and production issuers (needs my email) |
 | `ingress.yaml` | HTTPS Ingress for the app |
 
+**The Step 11 files, file by file** (click a section to expand it). Each file has a **Show the whole file** button first, then one section per part.
+
+**`k8s/platform/traefik-values.yaml`, section by section** (a Helm values file, not a Kubernetes manifest: it configures the Traefik install)
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+# Helm values for the Traefik ingress controller (installed once by hand, see implementation.md Step 11)
+service:
+  annotations:
+    # Gives the load balancer's public IP a free DNS name:
+    #   azure-cloud-ai.eastus.cloudapp.azure.com
+    # The label must be unique in the region. If it is taken, change it here AND in k8s/ingress.yaml.
+    service.beta.kubernetes.io/azure-dns-label-name: "azure-cloud-ai"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 128Mi
+
+# Redirect all plain HTTP traffic to HTTPS (Step 13)
+ports:
+  web:
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+```
+
+</details>
+
+<details>
+<summary><b>1. Comment</b></summary>
+
+```yaml
+# Helm values for the Traefik ingress controller (installed once by hand, see implementation.md Step 11)
+```
+
+Settings that override Traefik's defaults when I run `helm install` and `helm upgrade`. Traefik is installed by hand, one time, so the pipeline doesn't manage this file.
+
+</details>
+
+<details>
+<summary><b>2. DNS label for the public IP</b></summary>
+
+```yaml
+service:
+  annotations:
+    # Gives the load balancer's public IP a free DNS name:
+    #   azure-cloud-ai.eastus.cloudapp.azure.com
+    # The label must be unique in the region. If it is taken, change it here AND in k8s/ingress.yaml.
+    service.beta.kubernetes.io/azure-dns-label-name: "azure-cloud-ai"
+```
+
+Traefik's Service gets a public IP from Azure's load balancer. This annotation asks Azure to give that IP a free name: `<label>.<region>.cloudapp.azure.com`. The same hostname appears in `ingress.yaml`, so change both together if the label is taken.
+
+</details>
+
+<details>
+<summary><b>3. Resources</b></summary>
+
+```yaml
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 128Mi
+```
+
+Keeps Traefik small. `requests` is what is reserved on the node and `limits` is the maximum. A low request matters because my one node is nearly full.
+
+</details>
+
+<details>
+<summary><b>4. HTTP to HTTPS redirect</b></summary>
+
+```yaml
+# Redirect all plain HTTP traffic to HTTPS (Step 13)
+ports:
+  web:
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+```
+
+Added in Step 13. Anything that arrives on the plain HTTP entry point (`web`, port 80) is redirected to the HTTPS one (`websecure`). `permanent: true` makes it a permanent redirect (301/308), which browsers remember.
+
+</details>
+
+**`k8s/platform/cluster-issuers.yaml`, section by section** (the real file has my email address; it is shown here as `<your-email>`)
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+# Let's Encrypt certificate issuers for cert-manager.
+# Replace <your-email> before applying (Let's Encrypt uses it for expiry notices).
+# Staging certificates are not trusted by browsers but have generous rate limits: test with it first.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: <your-email>
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: <your-email>
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik
+```
+
+</details>
+
+<details>
+<summary><b>1. Comments</b></summary>
+
+```yaml
+# Let's Encrypt certificate issuers for cert-manager.
+# Replace <your-email> before applying (Let's Encrypt uses it for expiry notices).
+# Staging certificates are not trusted by browsers but have generous rate limits: test with it first.
+```
+
+This file defines two certificate issuers. The staging one is for testing, because its certificates aren't trusted by browsers but it has generous rate limits. The production one gives real certificates, with strict limits. The email is where Let's Encrypt sends expiry notices.
+
+</details>
+
+<details>
+<summary><b>2. The staging issuer</b></summary>
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: <your-email>
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik
+```
+
+- **`ClusterIssuer`** is a cert-manager object that can issue certificates for any namespace.
+- **`server`** is Let's Encrypt's staging address.
+- **`privateKeySecretRef`** names the Secret where cert-manager stores the account key it creates.
+- **`solvers: http01`** proves I own the hostname by placing a temporary file at a known web address. It is served through the `traefik` ingress class.
+
+</details>
+
+<details>
+<summary><b>3. Separator and the production issuer</b></summary>
+
+```yaml
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: <your-email>
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik
+```
+
+`---` separates the two objects. The second one is identical except for its name, the production Let's Encrypt `server` address, and its own account key Secret. The `Ingress` picks which issuer to use by name (`letsencrypt-staging` or `letsencrypt-prod`).
+
+</details>
+
+**`k8s/ingress.yaml`, section by section**
+
+<details>
+<summary><b>Show the whole file</b></summary>
+
+```yaml
+# Public entry point: HTTPS for the whole app. The frontend's nginx forwards /api to backend-api,
+# so one route to the frontend is enough.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  namespace: rag-app
+  annotations:
+    # Start with staging, switch to letsencrypt-prod once it works (implementation.md Step 11)
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - azure-cloud-ai.eastus.cloudapp.azure.com
+      secretName: app-tls
+  rules:
+    - host: azure-cloud-ai.eastus.cloudapp.azure.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+```
+
+</details>
+
+<details>
+<summary><b>1. Comment</b></summary>
+
+```yaml
+# Public entry point: HTTPS for the whole app. The frontend's nginx forwards /api to backend-api,
+# so one route to the frontend is enough.
+```
+
+This is how traffic from the internet gets into the cluster. Only the frontend needs a route, because its nginx already forwards `/api` to the backend.
+
+</details>
+
+<details>
+<summary><b>2. Kind, metadata and the issuer annotation</b></summary>
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  namespace: rag-app
+  annotations:
+    # Start with staging, switch to letsencrypt-prod once it works (implementation.md Step 11)
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+```
+
+An **Ingress** is a set of routing rules from outside the cluster to Services inside it. The `cert-manager.io/cluster-issuer` annotation tells cert-manager to get a certificate for this Ingress from the named issuer. It was `letsencrypt-staging` for testing and is `letsencrypt-prod` now.
+
+</details>
+
+<details>
+<summary><b>3. Ingress class</b></summary>
+
+```yaml
+spec:
+  ingressClassName: traefik
+```
+
+Says which controller handles these rules: Traefik. Without it, no controller would pick the Ingress up.
+
+</details>
+
+<details>
+<summary><b>4. TLS</b></summary>
+
+```yaml
+  tls:
+    - hosts:
+        - azure-cloud-ai.eastus.cloudapp.azure.com
+      secretName: app-tls
+```
+
+Turns on HTTPS for this hostname. cert-manager stores the issued certificate and private key in the Secret `app-tls`, and Traefik reads it from there. Deleting that Secret makes cert-manager issue a new certificate.
+
+</details>
+
+<details>
+<summary><b>5. Routing rule</b></summary>
+
+```yaml
+  rules:
+    - host: azure-cloud-ai.eastus.cloudapp.azure.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+```
+
+Requests for this hostname, on any path starting with `/`, go to the `frontend` Service on port 80. From there, nginx serves the site and forwards `/api` to `backend-api`.
+
+</details>
+
+
 `platform/` is a subfolder on purpose, so `kubectl apply -f k8s/` doesn't apply the issuers before cert-manager exists. Traefik and cert-manager are one-time cluster setup, so the pipeline doesn't manage them.
 
 **Before starting:** the cluster must be running, and I need Helm.
@@ -1977,6 +3323,44 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
    | `az resource list -g rg-portfolio --query ...` | Lists resources in the group whose names contain `azure-cloud-ai` |
 
    **The `Deploy monitoring (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-monitoring.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
+
+   <details>
+   <summary><b>Show the whole file</b></summary>
+
+   ```yaml
+   name: Deploy monitoring (infra)
+   
+   on:
+     workflow_dispatch:
+   
+   permissions:
+     id-token: write
+     contents: read
+   
+   env:
+     RG: rg-portfolio
+   
+   jobs:
+     deploy-monitoring:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+   
+         - uses: azure/login@v2
+           with:
+             client-id: ${{ secrets.AZURE_CLIENT_ID }}
+             tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+             subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   
+         - name: Deploy monitoring with Bicep
+           run: |
+             az deployment group create \
+               -g $RG \
+               -f infra/monitoring.bicep
+   ```
+
+   </details>
+
 
    <details>
    <summary><b>1. Name</b></summary>
