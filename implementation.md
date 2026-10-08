@@ -1440,6 +1440,17 @@ The shared AI Search service is not changed. Another project still uses its API 
 
 **Check:** the budget appears in the Budgets list with its three alert conditions.
 
+---
+
+---
+
+## To Do Before Making the Repo Public
+
+- [ ] Add screenshots to the README (live site with a cited answer, green Actions runs, Application Insights map) in `docs/images/`.
+- [ ] Check the README's cost estimate against my real budget numbers.
+- [ ] Stop tracking generated files: `git rm --cached Code/Frontend/tsconfig.tsbuildinfo`, add `*.tsbuildinfo` to `.gitignore`, then commit and push.
+- [ ] Read `implementation.md` once. It contains my Azure resource names and email address.
+
 ## Later Steps
 
 - Add Key Vault to infra if a real secret appears (optionally combine the Bicep files into one `main.bicep` with modules).

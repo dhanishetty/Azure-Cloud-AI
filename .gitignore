@@ -20,3 +20,4 @@ secrets.md
 .vscode/
 .DS_Store
 Thumbs.db
+*.tsbuildinfo
