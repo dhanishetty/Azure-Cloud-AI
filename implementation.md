@@ -11,14 +11,14 @@ Azure account: **dhanishetty@gmail.com** (not the work account).
 - [Step 2: Azure Identity (OIDC)](#step-2-azure-identity-oidc)
 - [Step 3: Repo Secrets](#step-3-repo-secrets)
 - [Step 4: Repo Variable](#step-4-repo-variable)
-- [Step 5: Run Order](#step-5-run-order) (ACR and image build workflows explained)
-- [Step 6: Deploy AKS](#step-6-deploy-aks) (AKS workflow explained)
+- [Step 5: Run Order](#step-5-run-order) (ACR Bicep file, ACR and image build workflows explained)
+- [Step 6: Deploy AKS](#step-6-deploy-aks) (AKS Bicep file and workflow explained)
 - [Step 7: Deploy the Frontend to AKS](#step-7-deploy-the-frontend-to-aks) (namespace, frontend and backend Service manifests explained)
-- [Step 8: Deploy Storage, AI Search and OpenAI](#step-8-deploy-storage-ai-search-and-openai) (data workflow explained)
-- [Step 9: Deploy the Backend and Worker with Managed Identity](#step-9-deploy-the-backend-and-worker-with-managed-identity) (identity workflow, ServiceAccounts, backend and worker manifests explained)
+- [Step 8: Deploy Storage, AI Search and OpenAI](#step-8-deploy-storage-ai-search-and-openai) (data Bicep file and workflow explained)
+- [Step 9: Deploy the Backend and Worker with Managed Identity](#step-9-deploy-the-backend-and-worker-with-managed-identity) (identity Bicep file and workflow, ServiceAccounts, backend and worker manifests explained)
 - [Step 10: Deploy to AKS Automatically (CI/CD)](#step-10-deploy-to-aks-automatically-cicd) (deploy-app workflow explained)
 - [Step 11: HTTPS and a Stable URL](#step-11-https-and-a-stable-url) (Traefik values, issuers and Ingress explained)
-- [Step 12: Monitoring](#step-12-monitoring) (monitoring workflow explained)
+- [Step 12: Monitoring](#step-12-monitoring) (monitoring Bicep file and workflow explained)
 - [Step 13: Hardening](#step-13-hardening)
 - [Step 14: Budget Alert](#step-14-budget-alert)
 - [To Do Before Making the Repo Public](#to-do-before-making-the-repo-public)
@@ -314,6 +314,75 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
    ```
    The registry should be listed with SKU `Basic`.
 
+   **`infra/acr.bicep`, section by section** (click a section to expand it). Bicep is the language that describes Azure resources as code; the workflow below deploys this file.
+   
+   <details>
+   <summary><b>Show the whole file</b></summary>
+   
+   ```bicep
+   @description('Globally unique ACR name (5-50 lowercase alphanumeric)')
+   param acrName string
+   
+   param location string = resourceGroup().location
+   
+   resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+     name: acrName
+     location: location
+     sku: { name: 'Basic' }
+     properties: { adminUserEnabled: false }
+   }
+   
+   output loginServer string = acr.properties.loginServer
+   ```
+   
+   </details>
+   
+   <details>
+   <summary><b>1. Parameters</b></summary>
+   
+   ```bicep
+   @description('Globally unique ACR name (5-50 lowercase alphanumeric)')
+   param acrName string
+   
+   param location string = resourceGroup().location
+   ```
+   
+   A **parameter** is an input to the file.
+   - **`acrName`** has no default, so the deployment must provide it. The workflow passes it with `-p acrName=$ACR_NAME`. The `@description` line documents the naming rule: the name must be unique across all of Azure, 5-50 characters, lowercase letters and digits only.
+   - **`location`** defaults to the region of the resource group the file is deployed into, so the registry lands in `eastus` without my typing it.
+   
+   </details>
+   
+   <details>
+   <summary><b>2. The registry</b></summary>
+   
+   ```bicep
+   resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+     name: acrName
+     location: location
+     sku: { name: 'Basic' }
+     properties: { adminUserEnabled: false }
+   }
+   ```
+   
+   - **`resource acr '...registries@2023-07-01'`** declares one Azure resource. `acr` is a name I use inside this file. The text in quotes is the resource type and the API version that defines which settings are allowed.
+   - **`sku: Basic`** is the cheapest tier (about $5 a month) and is enough for this project.
+   - **`adminUserEnabled: false`** turns off the shared admin username and password. Access works only through Azure roles: the pipeline uses `Contributor`, and AKS pulls images with `AcrPull`.
+   
+   </details>
+   
+   <details>
+   <summary><b>3. Output</b></summary>
+   
+   ```bicep
+   output loginServer string = acr.properties.loginServer
+   ```
+   
+   Returns the registry's address (`<name>.azurecr.io`) after the deployment. Nothing uses it yet, but it shows up in the deployment results.
+   
+   </details>
+   
+   
    **The `Deploy ACR (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-acr.yml`.
 
    <details>
@@ -808,6 +877,182 @@ When the workflow runs, GitHub vouches for the repo and branch. Azure checks tha
 
 5. **Run `Deploy AKS (infra)`:** GitHub repo > **Actions** tab > **Deploy AKS (infra)** > **Run workflow** > `main`. Takes about 5-10 minutes.
 
+   **`infra/aks.bicep`, section by section** (click a section to expand it). Bicep is the language that describes Azure resources as code; the workflow below deploys this file.
+   
+   <details>
+   <summary><b>Show the whole file</b></summary>
+   
+   ```bicep
+   @description('Name of the existing ACR the cluster pulls images from')
+   param acrName string
+   
+   param clusterName string = 'aks-azure-cloud-ai'
+   param location string = resourceGroup().location
+   param nodeVmSize string = 'Standard_B2s'
+   param nodeCount int = 1
+   
+   resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+     name: acrName
+   }
+   
+   resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
+     name: clusterName
+     location: location
+     sku: {
+       name: 'Base'
+       tier: 'Free'
+     }
+     identity: { type: 'SystemAssigned' }
+     properties: {
+       dnsPrefix: clusterName
+       agentPoolProfiles: [
+         {
+           name: 'system'
+           mode: 'System'
+           count: nodeCount
+           vmSize: nodeVmSize
+           osType: 'Linux'
+         }
+       ]
+       oidcIssuerProfile: { enabled: true }
+       securityProfile: {
+         workloadIdentity: { enabled: true }
+       }
+     }
+   }
+   
+   // Lets the cluster's nodes pull images from ACR (built-in AcrPull role)
+   var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+   
+   resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(acr.id, aks.id, acrPullRoleId)
+     scope: acr
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
+       principalId: aks.properties.identityProfile.kubeletidentity.objectId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   
+   output clusterName string = aks.name
+   ```
+   
+   </details>
+   
+   <details>
+   <summary><b>1. Parameters</b></summary>
+   
+   ```bicep
+   @description('Name of the existing ACR the cluster pulls images from')
+   param acrName string
+   
+   param clusterName string = 'aks-azure-cloud-ai'
+   param location string = resourceGroup().location
+   param nodeVmSize string = 'Standard_B2s'
+   param nodeCount int = 1
+   ```
+   
+   Inputs to the file:
+   - **`acrName`** has no default, so the workflow must pass it. It names the registry the cluster will pull images from.
+   - **`clusterName`**, **`nodeVmSize`** and **`nodeCount`** have defaults: the cluster name, a small `Standard_B2s` virtual machine, and one node. I can change them without editing the resources.
+   - **`location`** defaults to the resource group's region.
+   
+   </details>
+   
+   <details>
+   <summary><b>2. The existing registry</b></summary>
+   
+   ```bicep
+   resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+     name: acrName
+   }
+   ```
+   
+   The keyword **`existing`** means "look this up, don't create it". The registry was created earlier by `acr.bicep`. This lets the file refer to it, which the role assignment in section 4 needs.
+   
+   </details>
+   
+   <details>
+   <summary><b>3. The cluster</b></summary>
+   
+   ```bicep
+   resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
+     name: clusterName
+     location: location
+     sku: {
+       name: 'Base'
+       tier: 'Free'
+     }
+     identity: { type: 'SystemAssigned' }
+     properties: {
+       dnsPrefix: clusterName
+       agentPoolProfiles: [
+         {
+           name: 'system'
+           mode: 'System'
+           count: nodeCount
+           vmSize: nodeVmSize
+           osType: 'Linux'
+         }
+       ]
+       oidcIssuerProfile: { enabled: true }
+       securityProfile: {
+         workloadIdentity: { enabled: true }
+       }
+     }
+   }
+   ```
+   
+   - **`sku` Base / Free** is the free control plane: no charge for the cluster itself, and no uptime guarantee. I only pay for the node.
+   - **`identity: SystemAssigned`** gives the cluster its own managed identity, created and managed by Azure.
+   - **`dnsPrefix`** is a required name used for the cluster's API address.
+   - **`agentPoolProfiles`** defines the nodes: one pool named `system`, with `nodeCount` machines of size `nodeVmSize`, running Linux. `mode: System` means it also runs Kubernetes' own components alongside my pods.
+   - **`oidcIssuerProfile`** makes the cluster publish an identity token issuer. Azure uses it to trust tokens from my pods.
+   - **`workloadIdentity`** turns on AKS Workload Identity, which injects those tokens into pods. Together these two settings are what let the apps use managed identities instead of keys.
+   
+   </details>
+   
+   <details>
+   <summary><b>4. Letting the nodes pull images (AcrPull)</b></summary>
+   
+   ```bicep
+   // Lets the cluster's nodes pull images from ACR (built-in AcrPull role)
+   var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+   
+   resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(acr.id, aks.id, acrPullRoleId)
+     scope: acr
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
+       principalId: aks.properties.identityProfile.kubeletidentity.objectId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   ```
+   
+   A role assignment answers: who may do what, where.
+   - **`acrPullRoleId`** is the fixed ID of Azure's built-in `AcrPull` role, which allows reading images from a registry.
+   - **`name: guid(...)`** builds a name from the registry, the cluster and the role. Because it's calculated from fixed inputs, re-running the deployment produces the same name, so it never creates duplicates.
+   - **`scope: acr`** limits the permission to this one registry.
+   - **`principalId`** is the cluster's *kubelet identity*, the identity the nodes use to pull images. Azure creates it with the cluster, and Bicep reads its ID from the cluster resource.
+   - **`principalType: ServicePrincipal`** tells Azure what kind of identity it is, which avoids a delay while Azure works it out.
+   
+   Creating a role assignment needs more than `Contributor`, which is why I gave the pipeline `User Access Administrator` on the resource group in Step 6.
+   
+   </details>
+   
+   <details>
+   <summary><b>5. Output</b></summary>
+   
+   ```bicep
+   output clusterName string = aks.name
+   ```
+   
+   Returns the cluster name after the deployment.
+   
+   </details>
+   
+   
    **The `Deploy AKS (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-aks.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
 
    <details>
@@ -1467,6 +1712,330 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
 
 5. **Run `Deploy Storage, Search and OpenAI (infra)`:** GitHub repo > **Actions** tab > select it > **Run workflow** > `main`. Takes about 3-5 minutes.
 
+   **`infra/data-ai.bicep`, section by section** (click a section to expand it). Bicep is the language that describes Azure resources as code; the workflow below deploys this file.
+   
+   <details>
+   <summary><b>Show the whole file</b></summary>
+   
+   ```bicep
+   param location string = resourceGroup().location
+   
+   @description('Makes globally unique names; stable for a given resource group')
+   param suffix string = uniqueString(resourceGroup().id)
+   
+   param chatModel string = 'gpt-5-mini'
+   param chatModelVersion string = '2025-08-07'
+   param embedModel string = 'text-embedding-3-small'
+   param embedModelVersion string = '1'
+   
+   @description('Set false to reuse an existing AI Search service (only one Free service is allowed per subscription)')
+   param createSearch bool = true
+   
+   var storageName = 'stcloudai${suffix}'
+   var searchName = 'srch-cloud-ai-${suffix}'
+   var openaiName = 'oai-cloud-ai-${suffix}'
+   
+   // ---------- Storage: blob container + queue ----------
+   resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+     name: storageName
+     location: location
+     sku: { name: 'Standard_LRS' }
+     kind: 'StorageV2'
+     properties: {
+       minimumTlsVersion: 'TLS1_2'
+       allowBlobPublicAccess: false
+       allowSharedKeyAccess: false
+     }
+   }
+   
+   resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+     parent: storage
+     name: 'default'
+   }
+   
+   resource documentsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+     parent: blobService
+     name: 'documents'
+   }
+   
+   resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-01' = {
+     parent: storage
+     name: 'default'
+   }
+   
+   resource ingestQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = {
+     parent: queueService
+     name: 'ingest-jobs'
+   }
+   
+   // ---------- AI Search (Free tier: 1 per subscription, 50 MB) ----------
+   resource search 'Microsoft.Search/searchServices@2023-11-01' = if (createSearch) {
+     name: searchName
+     location: location
+     sku: { name: 'free' }
+     properties: {
+       replicaCount: 1
+       partitionCount: 1
+       hostingMode: 'default'
+     }
+   }
+   
+   // ---------- Azure OpenAI: account + chat and embedding deployments ----------
+   resource openai 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
+     name: openaiName
+     location: location
+     kind: 'OpenAI'
+     sku: { name: 'S0' }
+     properties: {
+       customSubDomainName: openaiName
+       publicNetworkAccess: 'Enabled'
+       disableLocalAuth: true
+     }
+   }
+   
+   resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2023-05-01' = {
+     parent: openai
+     name: 'chat'
+     sku: {
+       name: 'GlobalStandard'
+       capacity: 10
+     }
+     properties: {
+       model: {
+         format: 'OpenAI'
+         name: chatModel
+         version: chatModelVersion
+       }
+     }
+   }
+   
+   // Deployments on one account must be created one at a time
+   resource embedDeployment 'Microsoft.CognitiveServices/accounts/deployments@2023-05-01' = {
+     parent: openai
+     name: 'embeddings'
+     dependsOn: [ chatDeployment ]
+     sku: {
+       name: 'GlobalStandard'
+       capacity: 10
+     }
+     properties: {
+       model: {
+         format: 'OpenAI'
+         name: embedModel
+         version: embedModelVersion
+       }
+     }
+   }
+   
+   output storageName string = storage.name
+   output searchName string = createSearch ? search.name : 'existing (not created)'
+   output openaiName string = openai.name
+   ```
+   
+   </details>
+   
+   <details>
+   <summary><b>1. Parameters</b></summary>
+   
+   ```bicep
+   param location string = resourceGroup().location
+   
+   @description('Makes globally unique names; stable for a given resource group')
+   param suffix string = uniqueString(resourceGroup().id)
+   
+   param chatModel string = 'gpt-5-mini'
+   param chatModelVersion string = '2025-08-07'
+   param embedModel string = 'text-embedding-3-small'
+   param embedModelVersion string = '1'
+   
+   @description('Set false to reuse an existing AI Search service (only one Free service is allowed per subscription)')
+   param createSearch bool = true
+   ```
+   
+   Inputs to the file, all with defaults:
+   - **`location`** is the resource group's region.
+   - **`suffix`** is a short code made by `uniqueString` from the resource group's ID. It's always the same for this resource group, so re-running gives the same names.
+   - **`chatModel` / `chatModelVersion`** and **`embedModel` / `embedModelVersion`** say which OpenAI models to deploy. To swap a model, change these two pairs.
+   - **`createSearch`** switches the AI Search service on or off. The workflow passes `false` because I reuse a Free search service that already exists.
+   
+   </details>
+   
+   <details>
+   <summary><b>2. Variables (resource names)</b></summary>
+   
+   ```bicep
+   var storageName = 'stcloudai${suffix}'
+   var searchName = 'srch-cloud-ai-${suffix}'
+   var openaiName = 'oai-cloud-ai-${suffix}'
+   ```
+   
+   A **variable** is a value worked out inside the file. These build the names from the fixed prefix plus the suffix. Storage, Search and OpenAI names must be unique across all of Azure, and storage names are limited to 24 lowercase letters and digits (`stcloudai` plus the 13-character suffix is 22). `identity.bicep` uses the same rule to find these resources again.
+   
+   </details>
+   
+   <details>
+   <summary><b>3. Storage account</b></summary>
+   
+   ```bicep
+   resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+     name: storageName
+     location: location
+     sku: { name: 'Standard_LRS' }
+     kind: 'StorageV2'
+     properties: {
+       minimumTlsVersion: 'TLS1_2'
+       allowBlobPublicAccess: false
+       allowSharedKeyAccess: false
+     }
+   }
+   ```
+   
+   - **`Standard_LRS`** is the cheapest redundancy: three copies in one datacenter.
+   - **`kind: StorageV2`** is the standard general-purpose account type.
+   - **`minimumTlsVersion: TLS1_2`** refuses older, weaker encryption.
+   - **`allowBlobPublicAccess: false`** means no file can ever be made public.
+   - **`allowSharedKeyAccess: false`** (added in Step 13) turns off the account keys. Only Entra ID sign-in works, so the apps must use their managed identities.
+   
+   </details>
+   
+   <details>
+   <summary><b>4. Blob container and queue</b></summary>
+   
+   ```bicep
+   resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+     parent: storage
+     name: 'default'
+   }
+   
+   resource documentsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+     parent: blobService
+     name: 'documents'
+   }
+   
+   resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-01' = {
+     parent: storage
+     name: 'default'
+   }
+   
+   resource ingestQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = {
+     parent: queueService
+     name: 'ingest-jobs'
+   }
+   ```
+   
+   Resources that live inside another one use **`parent`**. The chain is storage account, then a service (`default`), then the item inside it:
+   - **`documents`** is the blob container where uploaded PDFs are stored.
+   - **`ingest-jobs`** is the queue the API writes to when a PDF is uploaded and the worker reads from.
+   
+   </details>
+   
+   <details>
+   <summary><b>5. AI Search (optional)</b></summary>
+   
+   ```bicep
+   resource search 'Microsoft.Search/searchServices@2023-11-01' = if (createSearch) {
+     name: searchName
+     location: location
+     sku: { name: 'free' }
+     properties: {
+       replicaCount: 1
+       partitionCount: 1
+       hostingMode: 'default'
+     }
+   }
+   ```
+   
+   - **`if (createSearch)`** makes the resource conditional. With `createSearch=false`, Bicep skips it completely.
+   - **`sku: free`** is the free tier: 50 MB, 3 indexes, and only one allowed per subscription.
+   - **`replicaCount`** and **`partitionCount`** of 1 are the only values the free tier allows.
+   
+   </details>
+   
+   <details>
+   <summary><b>6. Azure OpenAI account</b></summary>
+   
+   ```bicep
+   resource openai 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
+     name: openaiName
+     location: location
+     kind: 'OpenAI'
+     sku: { name: 'S0' }
+     properties: {
+       customSubDomainName: openaiName
+       publicNetworkAccess: 'Enabled'
+       disableLocalAuth: true
+     }
+   }
+   ```
+   
+   - **`kind: OpenAI`** with **`sku: S0`** is the standard Azure OpenAI account. It holds the model deployments but does not use any tokens by itself.
+   - **`customSubDomainName`** gives the account its own address (`<name>.openai.azure.com`). This is required for signing in with Entra ID instead of keys.
+   - **`publicNetworkAccess: Enabled`** lets the AKS pods reach it over the internet.
+   - **`disableLocalAuth: true`** (added in Step 13) turns off API keys. Only managed identities work.
+   
+   </details>
+   
+   <details>
+   <summary><b>7. Model deployments</b></summary>
+   
+   ```bicep
+   resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2023-05-01' = {
+     parent: openai
+     name: 'chat'
+     sku: {
+       name: 'GlobalStandard'
+       capacity: 10
+     }
+     properties: {
+       model: {
+         format: 'OpenAI'
+         name: chatModel
+         version: chatModelVersion
+       }
+     }
+   }
+   
+   // Deployments on one account must be created one at a time
+   resource embedDeployment 'Microsoft.CognitiveServices/accounts/deployments@2023-05-01' = {
+     parent: openai
+     name: 'embeddings'
+     dependsOn: [ chatDeployment ]
+     sku: {
+       name: 'GlobalStandard'
+       capacity: 10
+     }
+     properties: {
+       model: {
+         format: 'OpenAI'
+         name: embedModel
+         version: embedModelVersion
+       }
+     }
+   }
+   ```
+   
+   A **deployment** makes one model available under a name the apps call.
+   - **`name: chat`** and **`name: embeddings`** are the names the app's settings use (`OPENAI_CHAT_DEPLOYMENT` and `OPENAI_EMBED_DEPLOYMENT`). They must match.
+   - **`sku: GlobalStandard`, `capacity: 10`** is pay-per-token with a small rate limit of about 10,000 tokens a minute, which is enough for this project.
+   - **`model`** picks which model and version to run, from the parameters in section 1.
+   - **`dependsOn: [ chatDeployment ]`** makes the second one wait for the first, because Azure can't create two deployments on one account at the same time.
+   
+   </details>
+   
+   <details>
+   <summary><b>8. Outputs</b></summary>
+   
+   ```bicep
+   output storageName string = storage.name
+   output searchName string = createSearch ? search.name : 'existing (not created)'
+   output openaiName string = openai.name
+   ```
+   
+   Return the three resource names after the deployment. The search line uses `condition ? a : b`: if no search service was created, it prints a note instead of failing on a missing resource.
+   
+   </details>
+   
+   
    **The `Deploy Storage, Search and OpenAI (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-data-ai.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
 
    <details>
@@ -2103,6 +2672,318 @@ The worker image from my registry (the pipeline replaces `:latest` with the comm
    |---|---|
    | `az identity list -g rg-portfolio` | Lists managed identities in the resource group, with their client IDs |
 
+   **`infra/identity.bicep`, section by section** (click a section to expand it). Bicep is the language that describes Azure resources as code; the workflow below deploys this file.
+   
+   <details>
+   <summary><b>Show the whole file</b></summary>
+   
+   ```bicep
+   param location string = resourceGroup().location
+   param clusterName string = 'aks-azure-cloud-ai'
+   param namespace string = 'rag-app'
+   
+   // Same naming rule as data-ai.bicep, so these resolve to the resources Step 8 created
+   param suffix string = uniqueString(resourceGroup().id)
+   var storageName = 'stcloudai${suffix}'
+   var openaiName = 'oai-cloud-ai-${suffix}'
+   
+   resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' existing = {
+     name: clusterName
+   }
+   
+   resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+     name: storageName
+   }
+   
+   resource openai 'Microsoft.CognitiveServices/accounts@2023-05-01' existing = {
+     name: openaiName
+   }
+   
+   // ---------- Built-in role IDs ----------
+   var blobDataContributor = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+   var queueMessageSender = 'c6a89b2d-59bc-44d0-9896-0f6e12d7b80a'
+   var queueMessageProcessor = '8a0f0c08-91a1-4084-bc3d-661d67233fed'
+   var openaiUser = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+   
+   // ---------- Identities ----------
+   resource idApi 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+     name: 'id-api'
+     location: location
+   }
+   
+   resource idWorker 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+     name: 'id-worker'
+     location: location
+   }
+   
+   // ---------- Federated credentials: trust the Kubernetes ServiceAccounts ----------
+   resource fedApi 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+     parent: idApi
+     name: 'aks-sa-api'
+     properties: {
+       issuer: aks.properties.oidcIssuerProfile.issuerURL
+       subject: 'system:serviceaccount:${namespace}:sa-api'
+       audiences: [ 'api://AzureADTokenExchange' ]
+     }
+   }
+   
+   resource fedWorker 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+     parent: idWorker
+     name: 'aks-sa-worker'
+     properties: {
+       issuer: aks.properties.oidcIssuerProfile.issuerURL
+       subject: 'system:serviceaccount:${namespace}:sa-worker'
+       audiences: [ 'api://AzureADTokenExchange' ]
+     }
+   }
+   
+   // ---------- Role assignments: backend-api ----------
+   resource apiBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(storage.id, idApi.id, blobDataContributor)
+     scope: storage
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', blobDataContributor)
+       principalId: idApi.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   
+   resource apiQueue 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(storage.id, idApi.id, queueMessageSender)
+     scope: storage
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', queueMessageSender)
+       principalId: idApi.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   
+   resource apiOpenai 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(openai.id, idApi.id, openaiUser)
+     scope: openai
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', openaiUser)
+       principalId: idApi.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   
+   // ---------- Role assignments: ingestion-worker ----------
+   resource workerBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(storage.id, idWorker.id, blobDataContributor)
+     scope: storage
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', blobDataContributor)
+       principalId: idWorker.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   
+   resource workerQueue 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(storage.id, idWorker.id, queueMessageProcessor)
+     scope: storage
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', queueMessageProcessor)
+       principalId: idWorker.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   
+   resource workerOpenai 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(openai.id, idWorker.id, openaiUser)
+     scope: openai
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', openaiUser)
+       principalId: idWorker.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   
+   // Search roles are assigned with the CLI (the service is in another resource group)
+   output apiClientId string = idApi.properties.clientId
+   output apiPrincipalId string = idApi.properties.principalId
+   output workerClientId string = idWorker.properties.clientId
+   output workerPrincipalId string = idWorker.properties.principalId
+   ```
+   
+   </details>
+   
+   <details>
+   <summary><b>1. Parameters and names</b></summary>
+   
+   ```bicep
+   param location string = resourceGroup().location
+   param clusterName string = 'aks-azure-cloud-ai'
+   param namespace string = 'rag-app'
+   
+   // Same naming rule as data-ai.bicep, so these resolve to the resources Step 8 created
+   param suffix string = uniqueString(resourceGroup().id)
+   var storageName = 'stcloudai${suffix}'
+   var openaiName = 'oai-cloud-ai-${suffix}'
+   ```
+   
+   - **`clusterName`** and **`namespace`** say which cluster and Kubernetes namespace the identities will trust.
+   - **`suffix`**, **`storageName`** and **`openaiName`** use the exact same rule as `data-ai.bicep`, so this file works out the real names of the storage and OpenAI accounts without anyone passing them in.
+   
+   </details>
+   
+   <details>
+   <summary><b>2. Existing resources</b></summary>
+   
+   ```bicep
+   resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' existing = {
+     name: clusterName
+   }
+   
+   resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+     name: storageName
+   }
+   
+   resource openai 'Microsoft.CognitiveServices/accounts@2023-05-01' existing = {
+     name: openaiName
+   }
+   ```
+   
+   **`existing`** means "look this up, don't create it". These three were created by earlier steps. The file needs them to read the cluster's token issuer address and to attach permissions to the storage and OpenAI accounts.
+   
+   </details>
+   
+   <details>
+   <summary><b>3. Built-in role IDs</b></summary>
+   
+   ```bicep
+   var blobDataContributor = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+   var queueMessageSender = 'c6a89b2d-59bc-44d0-9896-0f6e12d7b80a'
+   var queueMessageProcessor = '8a0f0c08-91a1-4084-bc3d-661d67233fed'
+   var openaiUser = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+   ```
+   
+   Azure's built-in roles have fixed IDs. These variables give them readable names:
+   - **Storage Blob Data Contributor:** read, write and delete blobs.
+   - **Storage Queue Data Message Sender:** put messages on a queue.
+   - **Storage Queue Data Message Processor:** read and delete queue messages.
+   - **Cognitive Services OpenAI User:** call the OpenAI models.
+   
+   </details>
+   
+   <details>
+   <summary><b>4. The two managed identities</b></summary>
+   
+   ```bicep
+   resource idApi 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+     name: 'id-api'
+     location: location
+   }
+   
+   resource idWorker 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+     name: 'id-worker'
+     location: location
+   }
+   ```
+   
+   A **user-assigned managed identity** is an Azure identity with no password, created for one purpose. `id-api` is for the backend and `id-worker` is for the worker. Using two keeps each app's permissions separate (least privilege).
+   
+   </details>
+   
+   <details>
+   <summary><b>5. Federated credentials (trusting the Kubernetes ServiceAccounts)</b></summary>
+   
+   ```bicep
+   resource fedApi 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+     parent: idApi
+     name: 'aks-sa-api'
+     properties: {
+       issuer: aks.properties.oidcIssuerProfile.issuerURL
+       subject: 'system:serviceaccount:${namespace}:sa-api'
+       audiences: [ 'api://AzureADTokenExchange' ]
+     }
+   }
+   
+   resource fedWorker 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+     parent: idWorker
+     name: 'aks-sa-worker'
+     properties: {
+       issuer: aks.properties.oidcIssuerProfile.issuerURL
+       subject: 'system:serviceaccount:${namespace}:sa-worker'
+       audiences: [ 'api://AzureADTokenExchange' ]
+     }
+   }
+   ```
+   
+   A **federated credential** says: "trust tokens from this issuer, for this subject, as this identity". It's the same idea as the one for GitHub Actions in Step 2, but for pods.
+   - **`parent`** attaches it to the identity.
+   - **`issuer`** is the cluster's token issuer address, read from the cluster resource.
+   - **`subject`** is the Kubernetes ServiceAccount allowed to use the identity: `system:serviceaccount:rag-app:sa-api` (or `sa-worker`). The ServiceAccount names in `k8s/serviceaccounts.yaml` must match exactly.
+   - **`audiences`** is Azure's token exchange, the same value every time.
+   
+   </details>
+   
+   <details>
+   <summary><b>6. Role assignments for backend-api</b></summary>
+   
+   ```bicep
+   resource apiBlob 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(storage.id, idApi.id, blobDataContributor)
+     scope: storage
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', blobDataContributor)
+       principalId: idApi.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   ```
+   
+   (`apiQueue` and `apiOpenai` follow the same pattern, so only the first is shown here. The whole-file button above has all three.)
+   
+   A role assignment answers: who may do what, where.
+   - **`name: guid(...)`** is calculated from the scope, the identity and the role. It stays the same on every run, so re-running never creates duplicates.
+   - **`scope`** is where the permission applies: the storage account or the OpenAI account only.
+   - **`roleDefinitionId`** is the role from section 3.
+   - **`principalId`** is the identity receiving the role (`id-api`).
+   - **`principalType: ServicePrincipal`** avoids a delay while Azure works out what kind of identity it is.
+   
+   The three assignments give the backend: blob read and write, queue send, and OpenAI use.
+   
+   </details>
+   
+   <details>
+   <summary><b>7. Role assignments for ingestion-worker</b></summary>
+   
+   ```bicep
+   resource workerQueue 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+     name: guid(storage.id, idWorker.id, queueMessageProcessor)
+     scope: storage
+     properties: {
+       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', queueMessageProcessor)
+       principalId: idWorker.properties.principalId
+       principalType: 'ServicePrincipal'
+     }
+   }
+   ```
+   
+   (`workerBlob` and `workerOpenai` follow the same pattern.)
+   
+   The same structure, for `id-worker`. The worker gets blob read and write (it updates each document's status), **queue message processor** (it reads and deletes jobs, instead of the backend's send-only role), and OpenAI use.
+   
+   </details>
+   
+   <details>
+   <summary><b>8. Outputs and the Search roles</b></summary>
+   
+   ```bicep
+   // Search roles are assigned with the CLI (the service is in another resource group)
+   output apiClientId string = idApi.properties.clientId
+   output apiPrincipalId string = idApi.properties.principalId
+   output workerClientId string = idWorker.properties.clientId
+   output workerPrincipalId string = idWorker.properties.principalId
+   ```
+   
+   - The outputs return each identity's **client ID** and **principal ID** after the deployment.
+   - The AI Search roles are not in this file. The search service is in another resource group that the pipeline can't touch, so I assign those roles by hand with the CLI (Step 9, item 3).
+   
+   </details>
+   
+   
    **The `Deploy identities and roles (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-identity.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
 
    <details>
@@ -3322,6 +4203,118 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
    |---|---|
    | `az resource list -g rg-portfolio --query ...` | Lists resources in the group whose names contain `azure-cloud-ai` |
 
+   **`infra/monitoring.bicep`, section by section** (click a section to expand it). Bicep is the language that describes Azure resources as code; the workflow below deploys this file.
+   
+   <details>
+   <summary><b>Show the whole file</b></summary>
+   
+   ```bicep
+   param location string = resourceGroup().location
+   
+   // Log Analytics workspace: stores logs. The daily cap stops runaway ingestion costs.
+   resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+     name: 'log-azure-cloud-ai'
+     location: location
+     properties: {
+       sku: { name: 'PerGB2018' }
+       retentionInDays: 30
+       workspaceCapping: {
+         dailyQuotaGb: json('0.2')
+       }
+     }
+   }
+   
+   // Application Insights (workspace-based): request, failure and latency telemetry from the apps
+   resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+     name: 'appi-azure-cloud-ai'
+     location: location
+     kind: 'web'
+     properties: {
+       Application_Type: 'web'
+       WorkspaceResourceId: workspace.id
+       IngestionMode: 'LogAnalytics'
+     }
+   }
+   
+   output workspaceId string = workspace.id
+   output appInsightsName string = appInsights.name
+   ```
+   
+   </details>
+   
+   <details>
+   <summary><b>1. Parameter</b></summary>
+   
+   ```bicep
+   param location string = resourceGroup().location
+   ```
+   
+   The only input. It defaults to the resource group's region, so both resources land next to everything else.
+   
+   </details>
+   
+   <details>
+   <summary><b>2. Log Analytics workspace</b></summary>
+   
+   ```bicep
+   // Log Analytics workspace: stores logs. The daily cap stops runaway ingestion costs.
+   resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+     name: 'log-azure-cloud-ai'
+     location: location
+     properties: {
+       sku: { name: 'PerGB2018' }
+       retentionInDays: 30
+       workspaceCapping: {
+         dailyQuotaGb: json('0.2')
+       }
+     }
+   }
+   ```
+   
+   The workspace is where logs and telemetry are stored and queried.
+   - **`sku: PerGB2018`** is the standard pay-per-gigabyte pricing.
+   - **`retentionInDays: 30`** keeps data for 30 days, which is the cheapest standard setting.
+   - **`workspaceCapping.dailyQuotaGb`** stops collecting after 0.2 GB a day. This is the cost safety net: a noisy app can't run up the bill. **`json('0.2')`** is there because Bicep needs it to write a fractional number.
+   
+   </details>
+   
+   <details>
+   <summary><b>3. Application Insights</b></summary>
+   
+   ```bicep
+   // Application Insights (workspace-based): request, failure and latency telemetry from the apps
+   resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+     name: 'appi-azure-cloud-ai'
+     location: location
+     kind: 'web'
+     properties: {
+       Application_Type: 'web'
+       WorkspaceResourceId: workspace.id
+       IngestionMode: 'LogAnalytics'
+     }
+   }
+   ```
+   
+   Application Insights collects request counts, failures and response times from the backend and worker.
+   - **`kind` and `Application_Type`: web** describe the kind of app being monitored.
+   - **`WorkspaceResourceId: workspace.id`** links it to the workspace above, so its data is stored there and shares the daily cap. Using `workspace.id` also makes Bicep create the workspace first.
+   - **`IngestionMode: LogAnalytics`** makes it a workspace-based resource, the current standard. Data flows into Log Analytics instead of a separate store.
+   
+   </details>
+   
+   <details>
+   <summary><b>4. Outputs</b></summary>
+   
+   ```bicep
+   output workspaceId string = workspace.id
+   output appInsightsName string = appInsights.name
+   ```
+   
+   Return the workspace's full ID and the Application Insights name. The workspace ID is what `az aks enable-addons -a monitoring` needs in Step 12, item 3. The connection string is deliberately not an output, because deployment results are stored and visible; I fetch it with the CLI instead.
+   
+   </details>
+   
+   
    **The `Deploy monitoring (infra)` workflow, section by section** (click a section to expand it). The file is `.github/workflows/deploy-monitoring.yml`. It follows the same pattern as the `Deploy ACR (infra)` workflow in Step 5, so the shared parts are short here.
 
    <details>
