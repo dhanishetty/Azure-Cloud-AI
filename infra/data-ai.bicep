@@ -8,7 +8,7 @@ param chatModelVersion string = '2025-08-07'
 param embedModel string = 'text-embedding-3-small'
 param embedModelVersion string = '1'
 
-@description('Set false to reuse an existing AI Search service (only one Free service is allowed per subscription)')
+@description('Set false to skip creating an AI Search service (only one Free service is allowed per subscription)')
 param createSearch bool = true
 
 var storageName = 'stcloudai${suffix}'
@@ -108,5 +108,5 @@ resource embedDeployment 'Microsoft.CognitiveServices/accounts/deployments@2023-
 }
 
 output storageName string = storage.name
-output searchName string = createSearch ? search.name : 'existing (not created)'
+output searchName string = createSearch ? search.name : 'not created'
 output openaiName string = openai.name

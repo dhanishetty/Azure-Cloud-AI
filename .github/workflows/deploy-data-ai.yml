@@ -27,4 +27,4 @@ jobs:
           az deployment group create \
             -g $RG \
             -f infra/data-ai.bicep \
-            -p createSearch=false
+            -p createSearch=true

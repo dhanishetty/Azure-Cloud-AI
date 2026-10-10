@@ -12,7 +12,7 @@ Use this when every Azure resource has been deleted. The code, Bicep files, work
 | Still there | Gone |
 |---|---|
 | Repo, workflows, Bicep, manifests | `rg-portfolio` and everything in it (ACR, AKS, storage, OpenAI, monitoring) |
-| GitHub secrets and the `ACR_NAME` variable | The shared AI Search service `rag-vector-store` |
+| GitHub secrets and the `ACR_NAME` variable | The old shared AI Search service `rag-vector-store` (no longer used) |
 | App registration, service principal and federated credential (Entra ID, not an Azure resource) | `User Access Administrator` on `rg-portfolio` (it goes with the group) |
 | `Contributor` on the subscription (Step 2) | Uploaded PDFs, the search index, the Traefik IP and DNS name, the budget alert |
 
@@ -54,7 +54,7 @@ Resource names come back identical, because `uniqueString(resourceGroup().id)` g
 
    ---
 
-7. **Change one line, then deploy Storage, Search and OpenAI (Step 8).** In `.github/workflows/deploy-data-ai.yml`, change `-p createSearch=false` to `-p createSearch=true`. The shared search service is gone and the Free slot is empty, so Bicep creates a new one named `srch-cloud-ai-<suffix>`. Commit and push, then run **Deploy Storage, Search and OpenAI (infra)**.
+7. **Deploy Storage, Search and OpenAI (Step 8, items 3 to 5).** Make sure `deploy-data-ai.yml` passes `-p createSearch=true`, then run **Deploy Storage, Search and OpenAI (infra)**. Bicep creates the Free search service `srch-cloud-ai-<suffix>` along with storage and OpenAI.
 
    ---
 
@@ -71,27 +71,11 @@ Resource names come back identical, because `uniqueString(resourceGroup().id)` g
 
    ---
 
-10. **Give the identities access to the new search service (Step 9, item 3).** The search service is now in `rg-portfolio` and has a new name, so the old commands change:
-    ```powershell
-    $search = az search service list -g rg-portfolio --query "[0].name" -o tsv
-    $searchId = az search service show -g rg-portfolio -n $search --query id -o tsv
-    $apiPid = az identity show -g rg-portfolio -n id-api --query principalId -o tsv
-    $workerPid = az identity show -g rg-portfolio -n id-worker --query principalId -o tsv
-
-    az search service update -g rg-portfolio -n $search --auth-options aadOrApiKey --aad-auth-failure-mode http401WithBearerChallenge
-
-    az role assignment create --assignee-object-id $apiPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
-    az role assignment create --assignee-object-id $workerPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
-    az role assignment create --assignee-object-id $workerPid --assignee-principal-type ServicePrincipal --role "Search Service Contributor" --scope $searchId
-    ```
+10. **Give the identities access to the search service (Step 9, item 3).** Run the commands exactly as written there.
 
     ---
 
-11. **Create the ConfigMap again (Step 9, item 4), with the new search endpoint.** Use the item 4 commands, but set the search line from `$search`:
-    ```powershell
-    --from-literal="SEARCH_ENDPOINT=https://$search.search.windows.net"
-    ```
-    Every other line stays the same. The index `azure-cloud-ai-index` is created by the worker on the first upload.
+11. **Create the ConfigMap again (Step 9, item 4).** Run the commands exactly as written there. The index `azure-cloud-ai-index` is created by the worker on the first upload.
 
     ---
 
@@ -109,7 +93,7 @@ Resource names come back identical, because `uniqueString(resourceGroup().id)` g
 
 15. **Set the budget alert again (Step 14) and re-upload your PDFs.** Then open `https://azure-cloud-ai.eastus.cloudapp.azure.com` and ask a question.
 
-> Three things differ from the first build: `createSearch=true` in `deploy-data-ai.yml`, the search role commands (item 10) and the `SEARCH_ENDPOINT` in the ConfigMap (item 11). Everything else uses the same commands as before.
+> Every step above uses the same commands as the numbered steps below. The AI Search service is now created by the pipeline in `rg-portfolio`, not reused from another project.
 
 ## Table of Contents
 
@@ -1755,7 +1739,7 @@ The frontend image is `azurecloudai12345.azurecr.io/frontend:latest`. Change it 
 | Resource | Details | Cost |
 |---|---|---|
 | Storage account | Standard_LRS, blob container `documents`, queue `ingest-jobs` | Cents per month |
-| AI Search | Reuse my existing Free service `rag-vector-store` (in `rg-rag-qa-demo`). Not created by this step. | $0 |
+| AI Search | Free tier service `srch-cloud-ai-<suffix>`, created by this step (`createSearch=true`) | $0 |
 | Azure OpenAI | Account plus deployments `chat` (gpt-5-mini) and `embeddings` (text-embedding-3-small, 1536 dimensions) | Pay per token |
 
 Names get a unique suffix (`uniqueString`) because storage, search and OpenAI names must be globally unique.
@@ -1791,12 +1775,12 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
 
 ---
 
-3. **Check I don't already have a Free AI Search service** (only one is allowed per subscription):
+3. **Make sure no Free AI Search service exists yet, and set the workflow to create one.** Only one Free search service is allowed per subscription.
    ```powershell
    az resource list --resource-type Microsoft.Search/searchServices --query "[].{name:name, sku:sku.name, rg:resourceGroup}" -o table
    ```
-   **My result:** `rag-vector-store` (Free) already exists in `rg-rag-qa-demo`, so I reuse it. The workflow passes `createSearch=false`, so Bicep skips creating a search service. The worker creates the index itself (`create_or_update_index`), and Free allows 3 indexes. Step 9 uses this service's endpoint and keys. If the old project already uses an index named `documents-index` with a different schema, I set `SEARCH_INDEX` to a different name in Step 9. I do not delete the old service, because another project uses it.
-   If I ever want a new service instead, set `createSearch=true` and delete or change the Free service first (Basic is about $75/month, so avoid it).
+   - **Expected result: an empty list.** Then open `.github/workflows/deploy-data-ai.yml` and make sure the deploy step passes `-p createSearch=true` (change it from `false` if needed). Bicep then creates the Free service `srch-cloud-ai-<suffix>` in `rg-portfolio`. The worker creates the index itself on the first upload (`create_or_update_index`).
+   - **If a Free service is listed,** delete it first, or the deploy fails with a quota error. (Basic costs about $75/month, so avoid it.)
 
 ---
 
@@ -1837,7 +1821,7 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
    param embedModel string = 'text-embedding-3-small'
    param embedModelVersion string = '1'
    
-   @description('Set false to reuse an existing AI Search service (only one Free service is allowed per subscription)')
+   @description('Set false to skip creating an AI Search service (only one Free service is allowed per subscription)')
    param createSearch bool = true
    
    var storageName = 'stcloudai${suffix}'
@@ -1937,7 +1921,7 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
    }
    
    output storageName string = storage.name
-   output searchName string = createSearch ? search.name : 'existing (not created)'
+   output searchName string = createSearch ? search.name : 'not created'
    output openaiName string = openai.name
    ```
    
@@ -1957,7 +1941,7 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
    param embedModel string = 'text-embedding-3-small'
    param embedModelVersion string = '1'
    
-   @description('Set false to reuse an existing AI Search service (only one Free service is allowed per subscription)')
+   @description('Set false to skip creating an AI Search service (only one Free service is allowed per subscription)')
    param createSearch bool = true
    ```
    
@@ -1965,7 +1949,7 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
    - **`location`** is the resource group's region.
    - **`suffix`** is a short code made by `uniqueString` from the resource group's ID. It's always the same for this resource group, so re-running gives the same names.
    - **`chatModel` / `chatModelVersion`** and **`embedModel` / `embedModelVersion`** say which OpenAI models to deploy. To swap a model, change these two pairs.
-   - **`createSearch`** switches the AI Search service on or off. The workflow passes `false` because I reuse a Free search service that already exists.
+   - **`createSearch`** switches the AI Search service on or off. The workflow passes `true`, so Bicep creates the Free search service.
    
    </details>
    
@@ -2054,7 +2038,7 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
    }
    ```
    
-   - **`if (createSearch)`** makes the resource conditional. With `createSearch=false`, Bicep skips it completely.
+   - **`if (createSearch)`** makes the resource conditional. With `createSearch=true` (what the workflow passes), Bicep creates it. With `false`, Bicep skips it completely.
    - **`sku: free`** is the free tier: 50 MB, 3 indexes, and only one allowed per subscription.
    - **`replicaCount`** and **`partitionCount`** of 1 are the only values the free tier allows.
    
@@ -2136,7 +2120,7 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
    
    ```bicep
    output storageName string = storage.name
-   output searchName string = createSearch ? search.name : 'existing (not created)'
+   output searchName string = createSearch ? search.name : 'not created'
    output openaiName string = openai.name
    ```
    
@@ -2180,7 +2164,7 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
              az deployment group create \
                -g $RG \
                -f infra/data-ai.bicep \
-               -p createSearch=false
+               -p createSearch=true
    ```
 
    </details>
@@ -2265,11 +2249,11 @@ Names get a unique suffix (`uniqueString`) because storage, search and OpenAI na
        az deployment group create \
          -g $RG \
          -f infra/data-ai.bicep \
-         -p createSearch=false
+         -p createSearch=true
    ```
 
-   - **`-f infra/data-ai.bicep`** defines the storage account (blob container `documents`, queue `ingest-jobs`) and the Azure OpenAI account with its `chat` and `embeddings` deployments. Since Step 13 it also turns off storage shared keys and OpenAI API keys.
-   - **`-p createSearch=false`** tells Bicep not to create an AI Search service. The subscription allows only one Free search service, and I reuse the existing `rag-vector-store` that another project already holds.
+   - **`-f infra/data-ai.bicep`** defines the storage account (blob container `documents`, queue `ingest-jobs`), the Free AI Search service and the Azure OpenAI account with its `chat` and `embeddings` deployments. Since Step 13 it also turns off storage shared keys and OpenAI API keys.
+   - **`-p createSearch=true`** tells Bicep to create the AI Search service. The subscription allows only one Free search service, so this works only if none exists (item 3).
    - Re-running updates the resources in place, which is how Step 13 applied the hardening.
 
    </details>
@@ -3224,13 +3208,14 @@ The worker image from my registry (the pipeline replaces `:latest` with the comm
 
 ---
 
-3. **Give both identities access to the shared AI Search service.** It's in another resource group (`rg-rag-qa-demo`), so the pipeline can't do this. Run it as me:
+3. **Give both identities access to the AI Search service.** Step 8 created it in `rg-portfolio`, but `identity.bicep` doesn't assign Search roles, so I run this by hand:
    ```powershell
    $apiPid = az identity show -g rg-portfolio -n id-api --query principalId -o tsv
    $workerPid = az identity show -g rg-portfolio -n id-worker --query principalId -o tsv
-   $searchId = az search service show -g rg-rag-qa-demo -n rag-vector-store --query id -o tsv
+   $search = az search service list -g rg-portfolio --query "[0].name" -o tsv
+   $searchId = az search service show -g rg-portfolio -n $search --query id -o tsv
 
-   az search service update -g rg-rag-qa-demo -n rag-vector-store --auth-options aadOrApiKey --aad-auth-failure-mode http401WithBearerChallenge
+   az search service update -g rg-portfolio -n $search --auth-options aadOrApiKey --aad-auth-failure-mode http401WithBearerChallenge
 
    az role assignment create --assignee-object-id $apiPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
    az role assignment create --assignee-object-id $workerPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
@@ -3240,8 +3225,9 @@ The worker image from my registry (the pipeline replaces `:latest` with the comm
    | Command | What it does |
    |---|---|
    | `az identity show ... principalId` | Gets each identity's object ID, which role assignments need |
+   | `az search service list ... name` | Gets the name of the search service Step 8 created (`srch-cloud-ai-<suffix>`) |
    | `az search service show ... id` | Gets the search service's full resource ID, to use as the scope |
-   | `az search service update --auth-options aadOrApiKey` | Turns on Entra ID (role-based) sign-in. API keys keep working, so the old project is unaffected. |
+   | `az search service update --auth-options aadOrApiKey` | Turns on Entra ID (role-based) sign-in. API keys keep working too. |
    | `--aad-auth-failure-mode http401WithBearerChallenge` | Makes failed token sign-ins return a clear 401 |
    | `az role assignment create ...` | Grants a role on the search service to an identity |
 
@@ -3252,11 +3238,12 @@ The worker image from my registry (the pipeline replaces `:latest` with the comm
    $st = az storage account list -g rg-portfolio --query "[0].name" -o tsv
    $oai = az cognitiveservices account list -g rg-portfolio --query "[?kind=='OpenAI'].name | [0]" -o tsv
    $oaiEndpoint = az cognitiveservices account show -g rg-portfolio -n $oai --query properties.endpoint -o tsv
-   "$st | $oaiEndpoint"
+   $search = az search service list -g rg-portfolio --query "[0].name" -o tsv
+   "$st | $oaiEndpoint | $search"
 
    kubectl create configmap app-config -n rag-app `
      --from-literal="STORAGE_ACCOUNT_NAME=$st" `
-     --from-literal="SEARCH_ENDPOINT=https://rag-vector-store.search.windows.net" `
+     --from-literal="SEARCH_ENDPOINT=https://$search.search.windows.net" `
      --from-literal="SEARCH_INDEX=azure-cloud-ai-index" `
      --from-literal="OPENAI_ENDPOINT=$oaiEndpoint" `
      --from-literal="OPENAI_API_VERSION=2025-04-01-preview" `
@@ -3266,14 +3253,15 @@ The worker image from my registry (the pipeline replaces `:latest` with the comm
      --from-literal="OPENAI_EMBED_MODEL=text-embedding-3-small" `
      --from-literal="EMBED_DIMENSIONS=1536"
    ```
-   The `"$st | $oaiEndpoint"` line just prints the two values so I can check they aren't empty.
+   The `"$st | $oaiEndpoint | $search"` line just prints the three values so I can check they aren't empty.
 
    | Part | What it does |
    |---|---|
    | `az storage account list ... -o tsv` | Gets the storage account name Step 8 created |
    | `az cognitiveservices account ...` | Gets the OpenAI account name and endpoint URL |
+   | `az search service list ... name` | Gets the search service name, used to build `SEARCH_ENDPOINT` |
    | `kubectl create configmap app-config -n rag-app` | Creates a ConfigMap of plain settings. The Deployments read it as environment variables. |
-   | `SEARCH_INDEX=azure-cloud-ai-index` | Own index name, so I don't clash with the old project in the shared search service |
+   | `SEARCH_INDEX=azure-cloud-ai-index` | The index name. The worker creates it on the first upload. |
    | `OPENAI_*_DEPLOYMENT` | Must match the deployment names in `data-ai.bicep` (`chat`, `embeddings`) |
    | Backtick at line end | PowerShell line continuation |
 
@@ -4664,7 +4652,7 @@ If `helm` isn't found, install it with one of these, then reopen the terminal an
 | `disableLocalAuth: true` | Azure OpenAI account (`infra/data-ai.bicep`) | API keys stop working. Only Entra ID works. |
 | HTTP to HTTPS redirect | Traefik (`k8s/platform/traefik-values.yaml`) | `http://...` is permanently redirected to `https://...` |
 
-The shared AI Search service is not changed. Another project still uses its API keys.
+The AI Search service is not changed here. It still accepts API keys, but the apps use their managed identities.
 
 **Before starting:** the cluster must be running, and the app must work over HTTPS (upload a PDF and ask a question). If it works now, it will keep working, because the apps never used keys.
 
@@ -4683,7 +4671,7 @@ The shared AI Search service is not changed. Another project still uses its API 
 
 ---
 
-2. **Re-run the Storage, Search and OpenAI deployment:** repo > **Actions** tab > **Deploy Storage, Search and OpenAI (infra)** > **Run workflow** > `main`. It updates the two accounts in place. The workflow still passes `createSearch=false`, so the shared search service is untouched.
+2. **Re-run the Storage, Search and OpenAI deployment:** repo > **Actions** tab > **Deploy Storage, Search and OpenAI (infra)** > **Run workflow** > `main`. It updates the two accounts in place. The search service is unchanged.
 
 ---
 
