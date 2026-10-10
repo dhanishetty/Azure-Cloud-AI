@@ -3,8 +3,117 @@
 Deploy the full app (frontend + backend) on AKS, with GitHub Actions for CI/CD.
 Azure account: **dhanishetty@gmail.com** (not the work account).
 
+## Rebuild From Scratch (Empty Subscription)
+
+Use this when every Azure resource has been deleted. The code, Bicep files, workflows and manifests are all in this repo, so everything can be recreated. The steps below follow the original order. Details for each one are in the numbered step it points to.
+
+**What survives a full delete**
+
+| Still there | Gone |
+|---|---|
+| Repo, workflows, Bicep, manifests | `rg-portfolio` and everything in it (ACR, AKS, storage, OpenAI, monitoring) |
+| GitHub secrets and the `ACR_NAME` variable | The shared AI Search service `rag-vector-store` |
+| App registration, service principal and federated credential (Entra ID, not an Azure resource) | `User Access Administrator` on `rg-portfolio` (it goes with the group) |
+| `Contributor` on the subscription (Step 2) | Uploaded PDFs, the search index, the Traefik IP and DNS name, the budget alert |
+
+Resource names come back identical, because `uniqueString(resourceGroup().id)` gives the same value for the same group name.
+
+**Rebuild order**
+
+1. **Check the identity still exists.** Sign in as `dhanishetty@gmail.com`, then:
+   ```powershell
+   $appId = az ad app list --display-name Azure-Cloud-AI --query "[0].appId" -o tsv
+   $subId = az account show --query id -o tsv
+   az role assignment list --assignee $appId --scope "/subscriptions/$subId" -o table
+   ```
+   You should see `Contributor`. If the app is missing, redo Steps 2 to 4.
+
+   ---
+
+2. **Purge the soft-deleted OpenAI account.** Azure keeps a deleted OpenAI account for about 48 days, and the new one has the same name, so the deploy fails with a name conflict.
+   ```powershell
+   az cognitiveservices account list-deleted -o table
+   az cognitiveservices account purge -l eastus -g rg-portfolio -n <deleted-account-name>
+   ```
+
+   ---
+
+3. **Deploy ACR (Step 5).** Actions > **Deploy ACR (infra)** > Run workflow. It creates `rg-portfolio` and the registry.
+
+   ---
+
+4. **Give the pipeline `User Access Administrator` again (Step 6, item 3).** The role was on the old group, so it must be recreated on the new one.
+
+   ---
+
+5. **Build and push images (Step 5).** Actions > **Build and push images to ACR** > Run workflow.
+
+   ---
+
+6. **Deploy AKS (Step 6).** Actions > **Deploy AKS (infra)** > Run workflow.
+
+   ---
+
+7. **Change one line, then deploy Storage, Search and OpenAI (Step 8).** In `.github/workflows/deploy-data-ai.yml`, change `-p createSearch=false` to `-p createSearch=true`. The shared search service is gone and the Free slot is empty, so Bicep creates a new one named `srch-cloud-ai-<suffix>`. Commit and push, then run **Deploy Storage, Search and OpenAI (infra)**.
+
+   ---
+
+8. **Deploy identities and monitoring (Steps 9 and 12).** Run **Deploy Identity (infra)**, then **Deploy Monitoring (infra)**.
+
+   ---
+
+9. **Connect to the cluster and create the namespace and ServiceAccounts (Steps 6, 7 and 9).**
+   ```powershell
+   az aks get-credentials -g rg-portfolio -n aks-azure-cloud-ai --overwrite-existing
+   kubectl apply -f k8s/namespace.yaml
+   kubectl apply -f k8s/serviceaccounts.yaml
+   ```
+
+   ---
+
+10. **Give the identities access to the new search service (Step 9, item 3).** The search service is now in `rg-portfolio` and has a new name, so the old commands change:
+    ```powershell
+    $search = az search service list -g rg-portfolio --query "[0].name" -o tsv
+    $searchId = az search service show -g rg-portfolio -n $search --query id -o tsv
+    $apiPid = az identity show -g rg-portfolio -n id-api --query principalId -o tsv
+    $workerPid = az identity show -g rg-portfolio -n id-worker --query principalId -o tsv
+
+    az search service update -g rg-portfolio -n $search --auth-options aadOrApiKey --aad-auth-failure-mode http401WithBearerChallenge
+
+    az role assignment create --assignee-object-id $apiPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
+    az role assignment create --assignee-object-id $workerPid --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $searchId
+    az role assignment create --assignee-object-id $workerPid --assignee-principal-type ServicePrincipal --role "Search Service Contributor" --scope $searchId
+    ```
+
+    ---
+
+11. **Create the ConfigMap again (Step 9, item 4), with the new search endpoint.** Use the item 4 commands, but set the search line from `$search`:
+    ```powershell
+    --from-literal="SEARCH_ENDPOINT=https://$search.search.windows.net"
+    ```
+    Every other line stays the same. The index `azure-cloud-ai-index` is created by the worker on the first upload.
+
+    ---
+
+12. **Install HTTPS (Step 11).** Add the Helm repos, install Traefik and cert-manager, then apply `cluster-issuers.yaml` and `ingress.yaml`. The public IP is new, but the DNS label `azure-cloud-ai` should be free again. If the name does not resolve, change it in `traefik-values.yaml` and `ingress.yaml`. To avoid Let's Encrypt rate limits when rebuilding often, try `letsencrypt-staging` first.
+
+    ---
+
+13. **Deploy the app (Step 10).** Actions > **Deploy to AKS** > Run workflow. Check that the pods are `Running`.
+
+    ---
+
+14. **Add monitoring to the cluster (Step 12, items 3 and 4).** Run `az aks enable-addons` and add the Application Insights connection string to `app-config`. Do not re-run **Deploy AKS (infra)** after this.
+
+    ---
+
+15. **Set the budget alert again (Step 14) and re-upload your PDFs.** Then open `https://azure-cloud-ai.eastus.cloudapp.azure.com` and ask a question.
+
+> Three things differ from the first build: `createSearch=true` in `deploy-data-ai.yml`, the search role commands (item 10) and the `SEARCH_ENDPOINT` in the ConfigMap (item 11). Everything else uses the same commands as before.
+
 ## Table of Contents
 
+- [Rebuild From Scratch (Empty Subscription)](#rebuild-from-scratch-empty-subscription)
 - [Progress](#progress)
 - [Files Created](#files-created)
 - [Step 1: GitHub Repo](#step-1-github-repo)
